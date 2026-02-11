@@ -121,6 +121,13 @@ def ensure_date(x) -> date:
         return x
     return dtparser.parse(str(x)).date()
 
+def fmt_date(x) -> str:
+    # Handles pandas NaT safely
+    if pd.isna(x):
+        return "N/A"
+    if isinstance(x, (pd.Timestamp, datetime)):
+        return x.strftime("%b %d, %Y")
+    return str(x)
 
 # -----------------------------
 # Core logic: pick attempts + growth
