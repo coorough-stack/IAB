@@ -243,7 +243,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.drawString(left, y, f"Baseline Window ({w1.start.strftime('%b %d, %Y')} – {w1.end.strftime('%b %d, %Y')})")
     c.setFont("Helvetica", 11)
     bd = row.get("BaselineDate", pd.NaT)
-    bd_str = bd.strftime("%b %d, %Y") if isinstance(bd, datetime) else ("N/A" if pd.isna(bd) else str(bd))
+    bd_str = fmt_date(bd)    
     c.drawString(left, y - 18, f"Date: {bd_str}")
     c.drawString(left, y - 34, f"Score: {row.get('BaselineScore','N/A')}")
     c.drawString(left, y - 50, f"Error Band: {row.get('BaselineBandMin','')} – {row.get('BaselineBandMax','')}")
@@ -256,7 +256,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.drawString(left, y2, f"Follow-up Window ({w2.start.strftime('%b %d, %Y')} – {w2.end.strftime('%b %d, %Y')})")
     c.setFont("Helvetica", 11)
     fd = row.get("FollowupDate", pd.NaT)
-    fd_str = fd.strftime("%b %d, %Y") if isinstance(fd, datetime) else ("N/A" if pd.isna(fd) else str(fd))
+    fd_str = fmt_date(fd)
     c.drawString(left, y2 - 18, f"Date: {fd_str}")
     c.drawString(left, y2 - 34, f"Score: {row.get('FollowupScore','N/A')}")
     c.drawString(left, y2 - 50, f"Error Band: {row.get('FollowupBandMin','')} – {row.get('FollowupBandMax','')}")
@@ -547,3 +547,11 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
         file_name=f"{teacher_name}_{subject_override}_{assessment_name}.zip".replace(" ", "_"),
         mime="application/zip",
     )
+
+def fmt_date(x) -> str:
+    # Handles pandas NaT safely
+    if pd.isna(x):
+        return "N/A"
+    if isinstance(x, (pd.Timestamp, datetime)):
+        return x.strftime("%b %d, %Y")
+    return str(x)
