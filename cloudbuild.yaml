@@ -1,0 +1,32 @@
+steps:
+  # Build the container image from your Dockerfile
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "us-west2-docker.pkg.dev/$PROJECT_ID/iab-fiab/iab:$SHORT_SHA"
+      - "."
+
+  # Push image to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "us-west2-docker.pkg.dev/$PROJECT_ID/iab-fiab/iab:$SHORT_SHA"
+
+  # Deploy to Cloud Run service "iab"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "iab"
+      - "--image"
+      - "us-west2-docker.pkg.dev/$PROJECT_ID/iab-fiab/iab:$SHORT_SHA"
+      - "--region"
+      - "us-west2"
+      - "--platform"
+      - "managed"
+      - "--no-allow-unauthenticated"
+
+images:
+  - "us-west2-docker.pkg.dev/$PROJECT_ID/iab-fiab/iab:$SHORT_SHA"
