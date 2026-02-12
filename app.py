@@ -135,12 +135,28 @@ def normalize_sectionmap(df: pd.DataFrame) -> pd.DataFrame:
     missing = [c for c in need if c not in df.columns]
     if missing:
         raise ValueError(f"SectionMap CSV missing required columns: {missing}")
+
     df["SectionNumber"] = df["SectionNumber"].astype(str)
     df["TeacherName"] = df["TeacherName"].astype(str)
-    df["Subject"] = df["Subject"].astype(str)
-    # Normalize subject to Math/ELA labels
-    df["SubjectNorm"] = df["Subject"].str.upper().replace({"ENGLISH": "ELA"}).replace({"MATH": "Math", "ELA": "ELA"})
-    df["SubjectNorm"] = df["SubjectNorm"].replace({"MATH": "Math"})
+
+    # Subject can be blank for elementary "homeroom" sections.
+    # Treat blank/CORE/HOMEROOM/ELEM/BOTH as "Both" so those students appear in BOTH Math and ELA outputs.
+    subj_raw = df["Subject"].fillna("").astype(str).str.strip()
+    subj_up = subj_raw.str.upper()
+
+    subj_norm = pd.Series("Both", index=df.index)
+
+    math_mask = subj_up.str.contains("MATH", na=False)
+    ela_mask = subj_up.str.contains(r"ELA|ENGLISH|LANGUAGE|READ", regex=True, na=False)
+
+    # If it matches both, keep Both.
+    subj_norm.loc[math_mask & ~ela_mask] = "Math"
+    subj_norm.loc[ela_mask & ~math_mask] = "ELA"
+
+    both_mask = subj_up.str.contains("BOTH|CORE|HOMEROOM|HOME ROOM|ELEM|ELEMENTARY", regex=True, na=False) | (subj_raw == "")
+    subj_norm.loc[both_mask] = "Both"
+
+    df["SubjectNorm"] = subj_norm
     return df
 
 
@@ -614,6 +630,14 @@ def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame,
     return out
 
 
+
+def filter_teacher_map_by_subject(teacher_map: pd.DataFrame, subject_choice: str) -> pd.DataFrame:
+    # Include "Both" for elementary homeroom/core sections
+    if str(subject_choice).upper() == "MATH":
+        return teacher_map[teacher_map["SubjectNorm"].str.upper().isin(["MATH", "BOTH"])].copy()
+    return teacher_map[teacher_map["SubjectNorm"].str.upper().isin(["ELA", "BOTH"])].copy()
+
+
 # -----------------------------
 # UI
 # -----------------------------
@@ -684,11 +708,22 @@ if multi_mode and roster_file and section_file:
         crosswalk_df = normalize_crosswalk(read_csv_any(crosswalk_file)) if crosswalk_file else None
         teacher_map = build_student_teacher_map(roster_df, section_df, crosswalk_df)
 
+        # Validation: sections in roster missing from SectionMap
+        roster_sections = set(roster_df["SectionNumber"].dropna().astype(str).unique().tolist()) if "SectionNumber" in roster_df.columns else set()
+        mapped_sections = set(section_df["SectionNumber"].dropna().astype(str).unique().tolist()) if "SectionNumber" in section_df.columns else set()
+        missing_sections = sorted(list(roster_sections - mapped_sections))
+        if missing_sections:
+            st.warning(
+                f"{len(missing_sections)} section(s) in the roster are not present in the SectionMap. "
+                "Students in those sections will not be included until SectionMap is updated."
+            )
+            st.dataframe(pd.DataFrame({'Missing SectionNumber': missing_sections}))
+
         st.sidebar.header("Grouping")
         subject_choice = st.sidebar.selectbox("Subject", ["Math", "ELA"], index=0)
 
         # Filter map by subject
-        teacher_map_sub = teacher_map[teacher_map["SubjectNorm"].str.upper() == subject_choice.upper()].copy()
+        teacher_map_sub = filter_teacher_map_by_subject(teacher_map, subject_choice)
 
         teachers = sorted(teacher_map_sub["TeacherName"].unique().tolist())
         if not teachers:
@@ -710,7 +745,7 @@ if teacher_map is None or not multi_mode or not roster_file or not section_file:
     growth_df = build_growth_table(results_assess, w1, w2)
     st.caption("Single-file mode: generating one packet from the uploaded Results CSV.")
 else:
-    teacher_map_sub = teacher_map[teacher_map["SubjectNorm"].str.upper() == subject_choice.upper()].copy()
+    teacher_map_sub = filter_teacher_map_by_subject(teacher_map, subject_choice)
     if all_teachers:
         # preview shows combined across selected subject teachers (dedupe within teacher not needed for preview)
         student_ids = teacher_map_sub["StudentIdentifier"].unique().tolist()
@@ -777,7 +812,7 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
 
         else:
             # Multi-teacher mode
-            teacher_map_sub = teacher_map[teacher_map["SubjectNorm"].str.upper() == subject_choice.upper()].copy()
+            teacher_map_sub = filter_teacher_map_by_subject(teacher_map, subject_choice)
             teachers = sorted(teacher_map_sub["TeacherName"].unique().tolist())
 
             if all_teachers:
