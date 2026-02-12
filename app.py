@@ -639,6 +639,141 @@ def filter_teacher_map_by_subject(teacher_map: pd.DataFrame, subject_choice: str
 
 
 # -----------------------------
+# Exclusions / Data quality report
+# -----------------------------
+def build_exclusion_report(
+    results_assess: pd.DataFrame,
+    roster_df: pd.DataFrame,
+    section_df: pd.DataFrame,
+    crosswalk_df: pd.DataFrame | None,
+    subject_choice: str,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Builds a student-level report of who is excluded from outputs due to missing links:
+      Results -> (Crosswalk) -> Roster -> SectionMap (Teacher/Subject)
+
+    Returns:
+      exclusions_df: one row per student with a primary_reason + helpful details
+      summary: dict of counts
+    """
+    if results_assess.empty:
+        return pd.DataFrame(), {"results_students": 0, "included": 0, "excluded": 0}
+
+    # Unique students from results for this assessment
+    base_cols = ["StudentIdentifier", "FirstName", "LastName", "SchoolName", "GradeLevelWhenAssessed"]
+    base_cols = [c for c in base_cols if c in results_assess.columns]
+    res_students = results_assess[base_cols].drop_duplicates().copy()
+    res_students["StudentIdentifier"] = res_students["StudentIdentifier"].astype(str)
+
+    # Crosswalk (optional)
+    if crosswalk_df is not None and not crosswalk_df.empty:
+        xw = crosswalk_df[["StudentIdentifier", "StudentID"]].drop_duplicates().copy()
+        xw["StudentIdentifier"] = xw["StudentIdentifier"].astype(str)
+        xw["StudentID"] = xw["StudentID"].astype(str)
+    else:
+        xw = pd.DataFrame(columns=["StudentIdentifier", "StudentID"])
+
+    # Roster normalized columns (should already be normalized)
+    roster = roster_df[["StudentIdentifier", "StudentID", "SectionNumber"]].copy()
+    roster["StudentIdentifier"] = roster["StudentIdentifier"].astype(str)
+    roster["StudentID"] = roster["StudentID"].astype(str)
+    roster["SectionNumber"] = roster["SectionNumber"].astype(str)
+
+    # Map results -> roster via StudentIdentifier (direct)
+    m_sid = res_students.merge(roster, on="StudentIdentifier", how="left")
+
+    # Map results -> roster via crosswalk StudentID (fallback)
+    if not xw.empty:
+        m_xw = res_students.merge(xw, on="StudentIdentifier", how="left", suffixes=("", "_xw"))
+        m_xw = m_xw.merge(roster.drop(columns=["StudentIdentifier"]), on="StudentID", how="left")
+    else:
+        m_xw = res_students.copy()
+        m_xw["StudentID"] = pd.NA
+        m_xw["SectionNumber"] = pd.NA
+
+    # Combine mapping rows (students can have multiple sections)
+    m = pd.concat(
+        [
+            m_sid[res_students.columns.tolist() + ["StudentID", "SectionNumber"]],
+            m_xw[res_students.columns.tolist() + ["StudentID", "SectionNumber"]],
+        ],
+        ignore_index=True,
+    ).drop_duplicates()
+
+    # Join to SectionMap
+    sec = section_df[["SectionNumber", "TeacherName", "SubjectNorm"]].copy()
+    sec["SectionNumber"] = sec["SectionNumber"].astype(str)
+
+    m2 = m.merge(sec, on="SectionNumber", how="left")
+
+    # Subject filter set (include BOTH)
+    if str(subject_choice).upper() == "MATH":
+        ok_subjects = {"MATH", "BOTH"}
+    else:
+        ok_subjects = {"ELA", "BOTH"}
+
+    # Aggregate to student-level
+    def _agg_student(g: pd.DataFrame) -> pd.Series:
+        sid = g["StudentIdentifier"].iloc[0]
+        has_xw = sid in set(xw["StudentIdentifier"].astype(str).unique()) if not xw.empty else False
+
+        # sections from roster matches
+        sections = sorted(set([s for s in g["SectionNumber"].dropna().astype(str).tolist() if s not in ("nan", "NaN")]))
+        has_roster = len(sections) > 0
+
+        # sectionmap matches
+        # A section "matches" if it exists in sectionmap and has a TeacherName + SubjectNorm
+        section_rows = g.dropna(subset=["SectionNumber"]).copy()
+        has_any_sectionmap = section_rows["TeacherName"].notna().any() and section_rows["SubjectNorm"].notna().any()
+
+        # subject matches
+        subject_matches = section_rows["SubjectNorm"].astype(str).str.upper().isin(ok_subjects).any() if not section_rows.empty else False
+
+        # missing sections in sectionmap
+        missing_in_sectionmap = sorted(set(section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str).tolist()))
+
+        # primary reason
+        if not has_roster:
+            if xw.empty:
+                reason = "No roster match (and no crosswalk uploaded)"
+            elif not has_xw:
+                reason = "Missing in crosswalk"
+            else:
+                reason = "Crosswalk StudentID not found in roster"
+        elif not has_any_sectionmap:
+            reason = "SectionNumber not in SectionMap (or missing Teacher/Subject)"
+        elif not subject_matches:
+            reason = f"Section subject not {subject_choice} (only other subject(s) found)"
+        else:
+            reason = "Included"
+
+        return pd.Series(
+            {
+                "PrimaryReason": reason,
+                "InCrosswalk": has_xw,
+                "RosterSections": ", ".join(sections[:20]) + ("…" if len(sections) > 20 else ""),
+                "MissingSectionsInSectionMap": ", ".join(missing_in_sectionmap[:20]) + ("…" if len(missing_in_sectionmap) > 20 else ""),
+            }
+        )
+
+    student_report = m2.groupby("StudentIdentifier", as_index=False).apply(_agg_student)
+
+    # Included vs excluded
+    exclusions = student_report[student_report["PrimaryReason"] != "Included"].copy()
+
+    # Attach names/school/grade back (first non-null)
+    meta = res_students.groupby("StudentIdentifier", as_index=False).first()
+    out = meta.merge(exclusions, on="StudentIdentifier", how="inner")
+
+    summary = {
+        "results_students": int(res_students["StudentIdentifier"].nunique()),
+        "included": int(student_report[student_report["PrimaryReason"] == "Included"]["StudentIdentifier"].nunique()),
+        "excluded": int(exclusions["StudentIdentifier"].nunique()),
+    }
+    return out.sort_values(["PrimaryReason", "LastName", "FirstName"], na_position="last"), summary
+
+
+# -----------------------------
 # UI
 # -----------------------------
 st.title("IAB/FIAB Progress Reporting (v0.2)")
@@ -731,6 +866,40 @@ if multi_mode and roster_file and section_file:
         teacher_choice = st.sidebar.selectbox("Teacher", ["(All teachers)"] + teachers, index=0)
 
         all_teachers = (teacher_choice == "(All teachers)")
+
+
+        # -----------------------------
+        # Exclusions report (students excluded due to missing mappings)
+        # -----------------------------
+        with st.expander("Data Exclusions (students missing crosswalk/roster/section map)", expanded=False):
+            try:
+                excl_df, excl_summary = build_exclusion_report(
+                    results_assess,
+                    roster_df=roster_df,
+                    section_df=section_df,
+                    crosswalk_df=crosswalk_df,
+                    subject_choice=subject_choice,
+                )
+                st.write(
+                    f"Students in results for this assessment: **{excl_summary['results_students']}**  \n"
+                    f"Included in outputs (for {subject_choice}): **{excl_summary['included']}**  \n"
+                    f"Excluded due to missing links: **{excl_summary['excluded']}**"
+                )
+
+                if excl_df.empty:
+                    st.success("No excluded students detected for this assessment/subject.")
+                else:
+                    st.caption("Tip: download this CSV and use it as your to-do list for filling Crosswalk/Roster/SectionMap.")
+                    st.dataframe(excl_df, use_container_width=True)
+                    st.download_button(
+                        "Download exclusions CSV",
+                        data=excl_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"excluded_students_{subject_choice}_{assessment_name}.csv".replace(" ", "_"),
+                        mime="text/csv",
+                    )
+            except Exception as ex:
+                st.warning(f"Could not generate exclusions report: {ex}")
+
 
         # Warnings about missing section mappings
         missing_teacher_rows = teacher_map[teacher_map["TeacherName"].isna()].shape[0] if teacher_map is not None else 0
