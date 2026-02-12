@@ -11,6 +11,10 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+try:
+    from PyPDF2 import PdfMerger
+except Exception:  # pragma: no cover
+    PdfMerger = None
 
 # -----------------------------
 # Config
@@ -59,18 +63,42 @@ class Window:
 def read_csv_any(uploaded_file) -> pd.DataFrame:
     """
     Reads a Streamlit-uploaded CSV with flexible encoding and dtype=str to preserve IDs.
+    Uses caching keyed on raw file bytes for performance.
     """
     if uploaded_file is None:
         return None
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    return read_csv_bytes(raw)
+
+
+@st.cache_data(show_spinner=False)
+def read_csv_bytes(raw: bytes) -> pd.DataFrame:
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
         try:
             return pd.read_csv(io.BytesIO(raw), dtype=str, encoding=enc)
         except UnicodeDecodeError:
             continue
-    # last resort
     return pd.read_csv(io.BytesIO(raw), dtype=str, encoding_errors="replace")
 
+
+@st.cache_data(show_spinner=False)
+def normalize_results_cached(raw: bytes) -> pd.DataFrame:
+    return normalize_results(read_csv_bytes(raw))
+
+
+@st.cache_data(show_spinner=False)
+def normalize_crosswalk_cached(raw: bytes) -> pd.DataFrame:
+    return normalize_crosswalk(read_csv_bytes(raw))
+
+
+@st.cache_data(show_spinner=False)
+def normalize_sectionmap_cached(raw: bytes) -> pd.DataFrame:
+    return normalize_sectionmap(read_csv_bytes(raw))
+
+
+@st.cache_data(show_spinner=False)
+def normalize_roster_cached(raw: bytes) -> pd.DataFrame:
+    return normalize_roster(read_csv_bytes(raw))
 
 def strip_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -440,31 +468,63 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.drawString(left, 0.6 * inch, "Note: Growth compares the same assessment taken in two windows during the school year.")
 
 
+def make_single_student_pdf(row: pd.Series, w1: Window, w2: Window, thresholds: dict, teacher_label: str = "", subject_label: str = "") -> bytes:
+    b = io.BytesIO()
+    cc = canvas.Canvas(b, pagesize=letter)
+    draw_student_one_pager(cc, row, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
+    cc.save()
+    return b.getvalue()
+
+
 def make_student_packets(growth_df: pd.DataFrame, w1: Window, w2: Window, thresholds: dict, teacher_label: str = "", subject_label: str = "") -> tuple[bytes, dict]:
+    """
+    Performance:
+    - Preferred path (fast): generate each student page ONCE, then merge pages with PyPDF2 PdfMerger.
+    - Fallback (compatible): if PyPDF2 isn't available, use the original ReportLab 2-pass approach.
+    """
     out = growth_df.sort_values(["LastName", "FirstName", "StudentIdentifier"], na_position="last").copy()
 
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
-    for _, row in out.iterrows():
-        draw_student_one_pager(c, row, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
-        c.showPage()
-    c.save()
-    combined_bytes = buf.getvalue()
+    # Fallback if PyPDF2 not installed in the environment
+    if PdfMerger is None:
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=letter)
+        for _, row in out.iterrows():
+            draw_student_one_pager(c, row, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
+            c.showPage()
+        c.save()
+        combined_bytes = buf.getvalue()
 
+        individual = {}
+        for _, row in out.iterrows():
+            page_bytes = make_single_student_pdf(row, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
+            last = str(row.get("LastName", "") or "Last").strip()
+            first = str(row.get("FirstName", "") or "First").strip()
+            sid = str(row.get("StudentIdentifier", "") or "ID").strip()
+            fname = f"{last}_{first}_{sid}.pdf".replace(" ", "_")
+            individual[fname] = page_bytes
+
+        return combined_bytes, individual
+
+    # Fast path
     individual = {}
+    merger = PdfMerger()
+
     for _, row in out.iterrows():
-        b = io.BytesIO()
-        cc = canvas.Canvas(b, pagesize=letter)
-        draw_student_one_pager(cc, row, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
-        cc.save()
+        page_bytes = make_single_student_pdf(row, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
+
         last = str(row.get("LastName", "") or "Last").strip()
         first = str(row.get("FirstName", "") or "First").strip()
         sid = str(row.get("StudentIdentifier", "") or "ID").strip()
         fname = f"{last}_{first}_{sid}.pdf".replace(" ", "_")
-        individual[fname] = b.getvalue()
 
-    return combined_bytes, individual
+        individual[fname] = page_bytes
+        merger.append(io.BytesIO(page_bytes))
 
+    combined_buf = io.BytesIO()
+    merger.write(combined_buf)
+    merger.close()
+
+    return combined_buf.getvalue(), individual
 
 def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, w2: Window, teacher_label: str = "", subject_label: str = "") -> bytes:
     df = growth_df.copy()
@@ -792,7 +852,7 @@ if not results_file:
     st.stop()
 
 try:
-    results_df = normalize_results(read_csv_any(results_file))
+    results_df = normalize_results_cached(results_file.getvalue())
 except Exception as e:
     st.error(f"Could not read/normalize Results CSV: {e}")
     st.stop()
@@ -838,9 +898,9 @@ all_teachers = False
 
 if multi_mode and roster_file and section_file:
     try:
-        roster_df = normalize_roster(read_csv_any(roster_file))
-        section_df = normalize_sectionmap(read_csv_any(section_file))
-        crosswalk_df = normalize_crosswalk(read_csv_any(crosswalk_file)) if crosswalk_file else None
+        roster_df = normalize_roster_cached(roster_file.getvalue())
+        section_df = normalize_sectionmap_cached(section_file.getvalue())
+        crosswalk_df = normalize_crosswalk_cached(crosswalk_file.getvalue()) if crosswalk_file else None
         teacher_map = build_student_teacher_map(roster_df, section_df, crosswalk_df)
 
         # Validation: sections in roster missing from SectionMap
@@ -967,7 +1027,11 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                 if a_df.empty:
                     prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
                     continue
+
                 a_growth = build_growth_table(a_df, w1, w2)
+                if a_growth.empty:
+                    prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
+                    continue
 
                 combined_pdf, individual = make_student_packets(
                     a_growth, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label
@@ -975,37 +1039,54 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                 summary_pdf = make_summary_pdf(
                     a_growth, a, w1, w2, teacher_label=teacher_label, subject_label=subject_label
                 )
-
                 add_teacher_assessment_to_zip(z, teacher_label, subject_label, a, combined_pdf, summary_pdf, individual)
+
                 prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
 
         else:
-            # Multi-teacher mode
+            # Multi-teacher mode (performance-optimized):
+            # For each assessment, build the growth table ONCE, then assign teachers via join.
             teacher_map_sub = filter_teacher_map_by_subject(teacher_map, subject_choice)
-            teachers = sorted(teacher_map_sub["TeacherName"].unique().tolist())
+            teacher_map_join = teacher_map_sub[["StudentIdentifier", "TeacherName"]].drop_duplicates()
+
+            # Helper: compute how many teacher+assessment combos actually exist (for accurate progress)
+            total_tasks = 0
+            for a in assessments_to_run:
+                a_ids = results_df.loc[results_df["AssessmentName"] == a, ["StudentIdentifier"]].drop_duplicates()
+                if a_ids.empty:
+                    continue
+                present_teachers = a_ids.merge(teacher_map_join, on="StudentIdentifier", how="inner")["TeacherName"].nunique()
+                total_tasks += present_teachers
+            total_tasks = max(total_tasks, 1)
+
+            done = 0
+            prog = st.progress(0.0, text="Generating teacher packets…")
 
             if all_teachers:
-                total_tasks = max(len(teachers) * len(assessments_to_run), 1)
-                done = 0
-                prog = st.progress(0.0, text="Generating teacher packets…")
+                for a in assessments_to_run:
+                    a_df = results_df[results_df["AssessmentName"] == a].copy()
+                    if a_df.empty:
+                        continue
 
-                for t in teachers:
-                    student_ids = teacher_map_sub[teacher_map_sub["TeacherName"] == t]["StudentIdentifier"].unique().tolist()
-                    t_results = results_df[results_df["StudentIdentifier"].isin(student_ids)].copy()
+                    a_growth = build_growth_table(a_df, w1, w2)
+                    if a_growth.empty:
+                        continue
 
-                    for a in assessments_to_run:
-                        a_df = t_results[t_results["AssessmentName"] == a].copy()
-                        if a_df.empty:
-                            done += 1
-                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+                    # Assign teachers (duplicates students into each teacher's report if the student maps to multiple teachers)
+                    assigned = a_growth.merge(teacher_map_join, on="StudentIdentifier", how="inner")
+
+                    for t, t_df in assigned.groupby("TeacherName", sort=True):
+                        t_growth = t_df.drop(columns=["TeacherName"]).copy()
+
+                        # Guard: avoid empty packets
+                        if t_growth.empty:
                             continue
-                        a_growth = build_growth_table(a_df, w1, w2)
 
                         combined_pdf, individual = make_student_packets(
-                            a_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice
+                            t_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice
                         )
                         summary_pdf = make_summary_pdf(
-                            a_growth, a, w1, w2, teacher_label=t, subject_label=subject_choice
+                            t_growth, a, w1, w2, teacher_label=t, subject_label=subject_choice
                         )
                         add_teacher_assessment_to_zip(z, t, subject_choice, a, combined_pdf, summary_pdf, individual)
 
@@ -1013,32 +1094,37 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                         prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
 
             else:
-                # Single teacher
-                student_ids = teacher_map_sub[teacher_map_sub["TeacherName"] == teacher_choice]["StudentIdentifier"].unique().tolist()
-                t_results = results_df[results_df["StudentIdentifier"].isin(student_ids)].copy()
+                # Single teacher: still do assessment-first growth build, then filter
+                teacher_students = teacher_map_sub[teacher_map_sub["TeacherName"] == teacher_choice]["StudentIdentifier"].unique().tolist()
 
                 prog = st.progress(0.0, text="Generating assessment packets…")
                 for i, a in enumerate(assessments_to_run):
-                    a_df = t_results[t_results["AssessmentName"] == a].copy()
+                    a_df = results_df[results_df["AssessmentName"] == a].copy()
                     if a_df.empty:
                         prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
                         continue
+
                     a_growth = build_growth_table(a_df, w1, w2)
+                    t_growth = a_growth[a_growth["StudentIdentifier"].isin(teacher_students)].copy()
+
+                    if t_growth.empty:
+                        prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
+                        continue
 
                     combined_pdf, individual = make_student_packets(
-                        a_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice
+                        t_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice
                     )
                     summary_pdf = make_summary_pdf(
-                        a_growth, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
+                        t_growth, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
                     )
                     add_teacher_assessment_to_zip(z, teacher_choice, subject_choice, a, combined_pdf, summary_pdf, individual)
+
                     prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
 
     st.success("ZIP created.")
-    out_name = "IAB_FIAB_ALL_ASSESSMENTS.zip" if run_all_assessments else f"IAB_FIAB_{assessment_name}.zip"
     st.download_button(
         "Download ZIP",
         data=zip_buf.getvalue(),
-        file_name=out_name.replace(" ", "_"),
+        file_name=f"IAB_FIAB_{('ALL' if run_all_assessments else assessment_name)}.zip".replace(" ", "_"),
         mime="application/zip",
     )
