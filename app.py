@@ -1,3 +1,5 @@
+from reportlab.lib import colors
+
 def _wrap_text(c, text, max_width, font_name="Helvetica", font_size=11):
     """Simple word-wrap for ReportLab canvas."""
     if text is None:
@@ -40,7 +42,6 @@ from calendar import monthrange
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
-from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
