@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover
     PdfMerger = None
 
 # -----------------------------
-# Config
+# Config "stuff"
 # -----------------------------
 st.set_page_config(page_title="IAB/FIAB Progress Reports", layout="wide")
 
