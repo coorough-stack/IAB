@@ -661,10 +661,14 @@ with c2:
 w1 = Window("Baseline", w1_start, w1_end)
 w2 = Window("Follow-up", w2_start, w2_end)
 
+
 # Assessment selector
 assessments = sorted(results_df["AssessmentName"].dropna().unique().tolist())
-assessment_name = st.selectbox("Assessment", assessments)
 
+assessment_name = st.selectbox("Assessment (preview)", assessments)
+run_all_assessments = st.checkbox("Generate ALL assessments on export", value=False)
+
+# Preview uses the selected assessment
 results_assess = results_df[results_df["AssessmentName"] == assessment_name].copy()
 
 # Teacher mapping (optional)
@@ -732,43 +736,105 @@ st.dataframe(growth_df[preview_cols].sort_values(["LastName", "FirstName"], na_p
 # Export
 st.subheader("Export")
 
+
 if st.button("Generate ZIP (student one-pagers + summary)"):
+    assessments_to_run = assessments if run_all_assessments else [assessment_name]
+
+    # Determine whether multi-teacher grouping is ready
+    multi_ready = (
+        multi_mode
+        and (teacher_map is not None)
+        and (roster_file is not None)
+        and (section_file is not None)
+        and (subject_choice is not None)
+    )
+
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
 
-        if teacher_map is None or all_teachers is False and (teacher_choice is None):
-            # single-file: use sidebar teacher label
+        if not multi_ready:
+            # Single-file mode: use sidebar labels for folder naming
             teacher_label = st.sidebar.text_input("TeacherName (folder label)", value="Teacher", key="teacherlabel")
             subject_label = st.sidebar.selectbox("Subject label", ["Math", "ELA"], index=0, key="subjectlabel")
-            combined_pdf, individual = make_student_packets(growth_df, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label)
-            summary_pdf = make_summary_pdf(growth_df, assessment_name, w1, w2, teacher_label=teacher_label, subject_label=subject_label)
-            add_teacher_assessment_to_zip(z, teacher_label, subject_label, assessment_name, combined_pdf, summary_pdf, individual)
+
+            prog = st.progress(0.0, text="Generating assessment packets…")
+            for i, a in enumerate(assessments_to_run):
+                a_df = results_df[results_df["AssessmentName"] == a].copy()
+                if a_df.empty:
+                    prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
+                    continue
+                a_growth = build_growth_table(a_df, w1, w2)
+
+                combined_pdf, individual = make_student_packets(
+                    a_growth, w1, w2, thresholds, teacher_label=teacher_label, subject_label=subject_label
+                )
+                summary_pdf = make_summary_pdf(
+                    a_growth, a, w1, w2, teacher_label=teacher_label, subject_label=subject_label
+                )
+
+                add_teacher_assessment_to_zip(z, teacher_label, subject_label, a, combined_pdf, summary_pdf, individual)
+                prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
 
         else:
-            # multi-teacher
+            # Multi-teacher mode
             teacher_map_sub = teacher_map[teacher_map["SubjectNorm"].str.upper() == subject_choice.upper()].copy()
             teachers = sorted(teacher_map_sub["TeacherName"].unique().tolist())
 
             if all_teachers:
+                total_tasks = max(len(teachers) * len(assessments_to_run), 1)
+                done = 0
                 prog = st.progress(0.0, text="Generating teacher packets…")
-                for i, t in enumerate(teachers):
+
+                for t in teachers:
                     student_ids = teacher_map_sub[teacher_map_sub["TeacherName"] == t]["StudentIdentifier"].unique().tolist()
-                    t_growth = build_growth_table(results_assess[results_assess["StudentIdentifier"].isin(student_ids)], w1, w2)
-                    combined_pdf, individual = make_student_packets(t_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice)
-                    summary_pdf = make_summary_pdf(t_growth, assessment_name, w1, w2, teacher_label=t, subject_label=subject_choice)
-                    add_teacher_assessment_to_zip(z, t, subject_choice, assessment_name, combined_pdf, summary_pdf, individual)
-                    prog.progress((i + 1) / max(len(teachers), 1), text=f"Generating teacher packets… ({i+1}/{len(teachers)})")
+                    t_results = results_df[results_df["StudentIdentifier"].isin(student_ids)].copy()
+
+                    for a in assessments_to_run:
+                        a_df = t_results[t_results["AssessmentName"] == a].copy()
+                        if a_df.empty:
+                            done += 1
+                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+                            continue
+                        a_growth = build_growth_table(a_df, w1, w2)
+
+                        combined_pdf, individual = make_student_packets(
+                            a_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice
+                        )
+                        summary_pdf = make_summary_pdf(
+                            a_growth, a, w1, w2, teacher_label=t, subject_label=subject_choice
+                        )
+                        add_teacher_assessment_to_zip(z, t, subject_choice, a, combined_pdf, summary_pdf, individual)
+
+                        done += 1
+                        prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+
             else:
+                # Single teacher
                 student_ids = teacher_map_sub[teacher_map_sub["TeacherName"] == teacher_choice]["StudentIdentifier"].unique().tolist()
-                t_growth = build_growth_table(results_assess[results_assess["StudentIdentifier"].isin(student_ids)], w1, w2)
-                combined_pdf, individual = make_student_packets(t_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice)
-                summary_pdf = make_summary_pdf(t_growth, assessment_name, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice)
-                add_teacher_assessment_to_zip(z, teacher_choice, subject_choice, assessment_name, combined_pdf, summary_pdf, individual)
+                t_results = results_df[results_df["StudentIdentifier"].isin(student_ids)].copy()
+
+                prog = st.progress(0.0, text="Generating assessment packets…")
+                for i, a in enumerate(assessments_to_run):
+                    a_df = t_results[t_results["AssessmentName"] == a].copy()
+                    if a_df.empty:
+                        prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
+                        continue
+                    a_growth = build_growth_table(a_df, w1, w2)
+
+                    combined_pdf, individual = make_student_packets(
+                        a_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice
+                    )
+                    summary_pdf = make_summary_pdf(
+                        a_growth, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
+                    )
+                    add_teacher_assessment_to_zip(z, teacher_choice, subject_choice, a, combined_pdf, summary_pdf, individual)
+                    prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
 
     st.success("ZIP created.")
+    out_name = "IAB_FIAB_ALL_ASSESSMENTS.zip" if run_all_assessments else f"IAB_FIAB_{assessment_name}.zip"
     st.download_button(
         "Download ZIP",
         data=zip_buf.getvalue(),
-        file_name=f"IAB_FIAB_{assessment_name}.zip".replace(" ", "_"),
+        file_name=out_name.replace(" ", "_"),
         mime="application/zip",
     )
