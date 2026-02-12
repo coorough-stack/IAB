@@ -1,4 +1,3 @@
-from reportlab.lib import colors
 def _wrap_text(c, text, max_width, font_name="Helvetica", font_size=11):
     """Simple word-wrap for ReportLab canvas."""
     if text is None:
@@ -41,9 +40,9 @@ from calendar import monthrange
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
-from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 try:
     from PyPDF2 import PdfMerger
@@ -448,10 +447,190 @@ def growth_color(growth: float, thresholds: dict):
 
 
 def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Window, thresholds: dict, teacher_label: str = "", subject_label: str = ""):
+    """Student-facing 1-page PDF. Built with generous spacing to avoid overlap."""
     width, height = letter
     margin = 0.70 * inch
     x0 = margin
-    y_top = height - margin
+    xR = width - margin
+
+    # ---------- Header ----------
+    header_h = 0.85 * inch
+    c.saveState()
+    c.setFillColor(colors.black)
+    c.rect(0, height - header_h, width, header_h, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(x0, height - 0.52 * inch, "IAB/FIAB Growth Report")
+    c.setFont("Helvetica", 10)
+    rt = "Latest attempt in each window"
+    c.drawRightString(xR, height - 0.52 * inch, rt)
+    c.restoreState()
+
+    # Helpers
+    def _month_label(w: Window) -> str:
+        try:
+            if w.start.month == w.end.month and w.start.year == w.end.year:
+                return w.start.strftime("%b")
+            return f"{w.start.strftime('%b')}–{w.end.strftime('%b')}"
+        except Exception:
+            return "Window"
+
+    def _fit_font(text, max_w, start=15, min_size=11):
+        size = start
+        while size > min_size and c.stringWidth(str(text), "Helvetica-Bold", size) > max_w:
+            size -= 1
+        return size
+
+    # ---------- Top cards (Student + Assessment) ----------
+    y_top = height - header_h - 0.35 * inch
+
+    student_card_h = 1.20 * inch
+    student_card_y = y_top - student_card_h
+    student_card_w = width - 2 * margin
+
+    _draw_card(c, x0, student_card_y, student_card_w, student_card_h, title=None, fill=colors.whitesmoke)
+
+    student_name = f"{row.get('LastName','')}, {row.get('FirstName','')}".strip(", ").strip() or "Student"
+    sid = str(row.get("StudentIdentifier","") or "")
+    grade = str(row.get("GradeLevelWhenAssessed","") or "")
+    schoolyear = str(row.get("SchoolYear","") or "")
+    assessment = str(row.get("AssessmentName","") or "")
+
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillColor(colors.grey)
+    c.drawString(x0 + 12, student_card_y + student_card_h - 16, "STUDENT")
+    c.setFillColor(colors.black)
+
+    name_size = _fit_font(student_name, student_card_w - 24, start=16, min_size=12)
+    c.setFont("Helvetica-Bold", name_size)
+    c.drawString(x0 + 12, student_card_y + student_card_h - 38, student_name)
+
+    c.setFont("Helvetica", 10)
+    meta = f"StudentIdentifier: {sid}   •   Grade: {grade}   •   School Year: {schoolyear}"
+    c.drawString(x0 + 12, student_card_y + student_card_h - 56, meta)
+
+    if teacher_label:
+        c.drawString(x0 + 12, student_card_y + student_card_h - 72, f"Teacher: {teacher_label}   •   Subject: {subject_label}")
+
+    # Assessment card (separate so it never collides with student lines)
+    assess_card_h = 0.72 * inch
+    assess_card_y = student_card_y - 0.18 * inch - assess_card_h
+    _draw_card(c, x0, assess_card_y, student_card_w, assess_card_h, title=None, fill=colors.whitesmoke)
+
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillColor(colors.grey)
+    c.drawString(x0 + 12, assess_card_y + assess_card_h - 16, "ASSESSMENT")
+    c.setFillColor(colors.black)
+
+    # Wrap assessment name to 2 lines max
+    c.setFont("Helvetica", 11)
+    wrapped = _wrap_text(c, assessment, max_width=student_card_w - 24, font_name="Helvetica", font_size=11)
+    y_line = assess_card_y + assess_card_h - 38
+    for ln in wrapped[:2]:
+        c.drawString(x0 + 12, y_line, ln)
+        y_line -= 14
+
+    # ---------- Score cards row ----------
+    gap = 10
+    card_w = (width - 2 * margin - 2 * gap) / 3
+    card_h = 2.15 * inch
+    y_cards_top = assess_card_y - 0.28 * inch
+    y_cards = y_cards_top - card_h
+
+    x1 = x0
+    x2 = x0 + card_w + gap
+    x3 = x0 + 2 * (card_w + gap)
+
+    # Baseline card
+    _draw_card(c, x1, y_cards, card_w, card_h, title=f"Baseline ({_month_label(w1)})", fill=colors.whitesmoke)
+    b_date = fmt_date(row.get("BaselineDate", pd.NaT))
+    b_score = row.get("BaselineScore", pd.NA)
+    b_min = row.get("BaselineBandMin", pd.NA)
+    b_max = row.get("BaselineBandMax", pd.NA)
+    b_cat = str(row.get("BaselineCategory","") or "")
+    b_status = str(row.get("BaselineStatus","") or "")
+
+    c.setFont("Helvetica-Bold", 28)
+    c.drawString(x1 + 14, y_cards + card_h - 70, "N/A" if pd.isna(b_score) else f"{int(b_score)}")
+
+    c.setFont("Helvetica", 9)
+    c.setFillColor(colors.grey)
+    c.drawString(x1 + 14, y_cards + card_h - 88, f"Window: {w1.start.strftime('%b %d')}–{w1.end.strftime('%b %d')}")
+    c.setFillColor(colors.black)
+
+    c.setFont("Helvetica", 10)
+    c.drawString(x1 + 14, y_cards + card_h - 110, f"Date: {b_date}")
+    c.drawString(x1 + 14, y_cards + card_h - 126, f"Error band: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
+    c.drawString(x1 + 14, y_cards + card_h - 142, f"Category: {b_cat}")
+    c.drawString(x1 + 14, y_cards + card_h - 158, f"Status: {b_status}")
+
+    # Follow-up card
+    _draw_card(c, x2, y_cards, card_w, card_h, title=f"Follow-up ({_month_label(w2)})", fill=colors.whitesmoke)
+    f_date = fmt_date(row.get("FollowupDate", pd.NaT))
+    f_score = row.get("FollowupScore", pd.NA)
+    f_min = row.get("FollowupBandMin", pd.NA)
+    f_max = row.get("FollowupBandMax", pd.NA)
+    f_cat = str(row.get("FollowupCategory","") or "")
+    f_status = str(row.get("FollowupStatus","") or "")
+
+    c.setFont("Helvetica-Bold", 28)
+    c.drawString(x2 + 14, y_cards + card_h - 70, "N/A" if pd.isna(f_score) else f"{int(f_score)}")
+
+    c.setFont("Helvetica", 9)
+    c.setFillColor(colors.grey)
+    c.drawString(x2 + 14, y_cards + card_h - 88, f"Window: {w2.start.strftime('%b %d')}–{w2.end.strftime('%b %d')}")
+    c.setFillColor(colors.black)
+
+    c.setFont("Helvetica", 10)
+    c.drawString(x2 + 14, y_cards + card_h - 110, f"Date: {f_date}")
+    c.drawString(x2 + 14, y_cards + card_h - 126, f"Error band: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
+    c.drawString(x2 + 14, y_cards + card_h - 142, f"Category: {f_cat}")
+    c.drawString(x2 + 14, y_cards + card_h - 158, f"Status: {f_status}")
+
+    # Growth card
+    _draw_card(c, x3, y_cards, card_w, card_h, title="Growth", fill=colors.whitesmoke)
+    g = row.get("Growth", pd.NA)
+    g_color = growth_color(g, thresholds)
+
+    pill_h = 0.82 * inch
+    pill_w = card_w - 28
+    pill_x = x3 + 14
+    pill_y = y_cards + card_h - 118  # bottom of pill
+
+    c.saveState()
+    c.setFillColor(g_color)
+    c.roundRect(pill_x, pill_y, pill_w, pill_h, 12, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 32)
+    gtxt = "N/A" if pd.isna(g) else f"{int(g):+d}"
+    c.drawCentredString(pill_x + pill_w / 2, pill_y + 24, gtxt)
+    c.restoreState()
+
+    c.setFont("Helvetica", 9)
+    c.setFillColor(colors.grey)
+    c.drawCentredString(x3 + card_w / 2, pill_y - 14, "Points (Follow-up − Baseline)")
+    c.setFillColor(colors.black)
+
+    if (not pd.isna(b_score)) and (not pd.isna(f_score)):
+        c.setFont("Helvetica-Bold", 12)
+        c.drawCentredString(x3 + card_w / 2, pill_y - 34, f"{int(b_score)}  →  {int(f_score)}")
+
+    # ---------- Footer (single, wrapped) ----------
+    footer = (
+        f"Baseline window: {w1.start.strftime('%b %d, %Y')}–{w1.end.strftime('%b %d, %Y')}  •  "
+        f"Follow-up window: {w2.start.strftime('%b %d, %Y')}–{w2.end.strftime('%b %d, %Y')}  •  "
+        f"Highlight: Green ≥ {thresholds['green_min']}  •  Gold ≥ {thresholds['yellow_min']}  •  Red ≤ {thresholds['red_max']}"
+    )
+
+    c.setFont("Helvetica", 8.5)
+    c.setFillColor(colors.grey)
+    flines = _wrap_text(c, footer, max_width=(width - 2 * margin), font_name="Helvetica", font_size=8.5)
+    y_footer = y_cards - 0.50 * inch
+    for i, ln in enumerate(flines[:3]):
+        c.drawString(x0, y_footer - 10 * i, ln)
+    c.setFillColor(colors.black)
+
+
 
     # ===== Header =====
     c.saveState()
