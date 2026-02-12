@@ -50,6 +50,9 @@ try:
 except Exception:  # pragma: no cover
     PdfMerger = None
 
+from reportlab.lib import colors
+
+
 # -----------------------------
 # Config
 # -----------------------------
