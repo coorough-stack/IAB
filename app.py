@@ -1,4 +1,4 @@
-
+from reportlab.lib import colors
 def _wrap_text(c, text, max_width, font_name="Helvetica", font_size=11):
     """Simple word-wrap for ReportLab canvas."""
     if text is None:
