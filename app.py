@@ -1400,12 +1400,50 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     return buf.getvalue()
 
 
-def add_teacher_assessment_to_zip(z: zipfile.ZipFile, teacher: str, subject: str, assessment: str, combined_pdf: bytes, summary_pdf: bytes, individual_pdfs: dict):
-    base_folder = f"{teacher}/{subject}/{assessment}".replace(" ", "_")
+def _safe_path_part(s: str) -> str:
+    s = str(s or "").strip()
+    # avoid breaking ZIP paths
+    s = s.replace("/", "-").replace("\\", "-").replace(":", "-").replace("|", "-")
+    s = " ".join(s.split())
+    return s.replace(" ", "_")
+
+
+def _section_folder_label(section_number: str, period: str | None = None, room: str | None = None) -> str:
+    sec = str(section_number or "").strip() or "Unknown"
+    label = f"Sec_{sec}"
+
+    p = str(period or "").strip()
+    if p and p.lower() not in ("nan", "none"):
+        label = f"P{p}_{label}"
+
+    r = str(room or "").strip()
+    if r and r.lower() not in ("nan", "none"):
+        label = f"{label}_{r}"
+
+    return _safe_path_part(label)
+
+
+def add_teacher_assessment_to_zip(
+    z: zipfile.ZipFile,
+    teacher: str,
+    subject: str,
+    assessment: str,
+    combined_pdf: bytes,
+    summary_pdf: bytes,
+    individual_pdfs: dict,
+    section_folder: str | None = None,
+):
+    parts = [teacher, subject, assessment]
+    if section_folder:
+        parts.append(section_folder)
+
+    base_folder = "/".join(_safe_path_part(p) for p in parts if p is not None and str(p).strip() != "")
+
     z.writestr(f"{base_folder}/Student_Pages.pdf", combined_pdf)
     z.writestr(f"{base_folder}/Summary.pdf", summary_pdf)
+
     for fname, b in individual_pdfs.items():
-        z.writestr(f"{base_folder}/Students/{fname}", b)
+        z.writestr(f"{base_folder}/Students/{_safe_path_part(fname)}", b)
 
 
 # -----------------------------
@@ -1416,7 +1454,8 @@ def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame,
     Build a student->teacher mapping used for per-teacher exports.
 
     Returns unique rows with columns:
-        StudentIdentifier, TeacherName, SubjectNorm
+        StudentIdentifier, TeacherName, SubjectNorm, SectionNumber
+        plus optional: Period, Room, CourseName (if present in SectionMap)
 
     Notes:
     - If roster already has StudentIdentifier, crosswalk is optional.
@@ -1464,20 +1503,32 @@ def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame,
     if "SubjectNorm" not in section.columns:
         raise ValueError("SectionMap is missing Subject (normalized). Make sure Subject exists in SectionMap CSV.")
 
+    # Include optional fields for section folder labeling
     sec_cols = join_keys + ["TeacherName", "SubjectNorm"]
-    sec_cols = [c for c in sec_cols if c in section.columns]
+    for opt in ("Period", "Room", "CourseName"):
+        if opt in section.columns and opt not in sec_cols:
+            sec_cols.append(opt)
 
     merged = roster.merge(section[sec_cols], on=join_keys, how="left")
 
-    out = merged[["StudentIdentifier", "TeacherName", "SubjectNorm"]].dropna(
-        subset=["StudentIdentifier", "TeacherName", "SubjectNorm"]
-    ).drop_duplicates()
+    out_cols = ["StudentIdentifier", "TeacherName", "SubjectNorm", "SectionNumber"]
+    for opt in ("Period", "Room", "CourseName"):
+        if opt in merged.columns and opt not in out_cols:
+            out_cols.append(opt)
+
+    out = (
+        merged[out_cols]
+        .dropna(subset=["StudentIdentifier", "TeacherName", "SubjectNorm", "SectionNumber"])
+        .drop_duplicates()
+    )
 
     out["StudentIdentifier"] = out["StudentIdentifier"].astype(str)
     out["TeacherName"] = out["TeacherName"].astype(str)
     out["SubjectNorm"] = out["SubjectNorm"].astype(str)
+    out["SectionNumber"] = out["SectionNumber"].astype(str)
 
     return out
+
 def filter_teacher_map_by_subject(teacher_map: pd.DataFrame, subject_choice: str) -> pd.DataFrame:
     # Include "Both" for elementary homeroom/core sections
     if str(subject_choice).upper() == "MATH":
@@ -1861,6 +1912,11 @@ st.dataframe(growth_df[preview_cols].sort_values(["LastName", "FirstName"], na_p
 # Export
 st.subheader("Export")
 
+split_by_section = st.checkbox(
+    "Split exports by section (adds folders inside each assessment)",
+    value=True,
+    help="Creates: Teacher/Subject/Assessment/P#_Sec_####_<Room>/ ...",
+)
 
 if st.button("Generate ZIP (student one-pagers + summary)"):
     assessments_to_run = assessments if run_all_assessments else [assessment_name]
@@ -1900,28 +1956,42 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                 summary_pdf = make_summary_pdf(
                     a_growth, a, w1, w2, teacher_label=teacher_label, subject_label=subject_label
                 )
+
+                # (single-file mode has no roster/sections, so keep current structure)
                 add_teacher_assessment_to_zip(z, teacher_label, subject_label, a, combined_pdf, summary_pdf, individual)
 
                 prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
 
         else:
-            # Multi-teacher mode (performance-optimized):
-            # For each assessment, build the growth table ONCE, then assign teachers via join.
+            # Multi-teacher mode:
             teacher_map_sub = filter_teacher_map_by_subject(teacher_map, subject_choice)
-            teacher_map_join = teacher_map_sub[["StudentIdentifier", "TeacherName"]].drop_duplicates()
 
-            # Helper: compute how many teacher+assessment combos actually exist (for accurate progress)
+            join_cols = [c for c in ["StudentIdentifier", "TeacherName", "SectionNumber", "Period", "Room", "CourseName"] if c in teacher_map_sub.columns]
+            teacher_map_join = teacher_map_sub[join_cols].drop_duplicates()
+
+            # Helper: compute total tasks for progress bar
             total_tasks = 0
             for a in assessments_to_run:
                 a_ids = results_df.loc[results_df["AssessmentName"] == a, ["StudentIdentifier"]].drop_duplicates()
                 if a_ids.empty:
                     continue
-                present_teachers = a_ids.merge(teacher_map_join, on="StudentIdentifier", how="inner")["TeacherName"].nunique()
-                total_tasks += present_teachers
-            total_tasks = max(total_tasks, 1)
 
+                present = a_ids.merge(teacher_map_join, on="StudentIdentifier", how="inner")
+                if present.empty:
+                    continue
+
+                if split_by_section:
+                    present_groups = present[["TeacherName", "SectionNumber"]].drop_duplicates().shape[0]
+                else:
+                    present_groups = present["TeacherName"].nunique()
+
+                total_tasks += int(present_groups)
+
+            total_tasks = max(total_tasks, 1)
             done = 0
             prog = st.progress(0.0, text="Generating teacher packets…")
+
+            drop_cols_base = [c for c in ["TeacherName", "SectionNumber", "Period", "Room", "CourseName"] if c in teacher_map_join.columns]
 
             if all_teachers:
                 for a in assessments_to_run:
@@ -1933,54 +2003,131 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                     if a_growth.empty:
                         continue
 
-                    # Assign teachers (duplicates students into each teacher's report if the student maps to multiple teachers)
                     assigned = a_growth.merge(teacher_map_join, on="StudentIdentifier", how="inner")
+                    if assigned.empty:
+                        continue
 
-                    for t, t_df in assigned.groupby("TeacherName", sort=True):
-                        t_growth = t_df.drop(columns=["TeacherName"]).copy()
+                    if split_by_section:
+                        # Teacher + Section folders
+                        for (t, sec), gdf in assigned.groupby(["TeacherName", "SectionNumber"], sort=True):
+                            period = None
+                            room = None
+                            if "Period" in gdf.columns and gdf["Period"].notna().any():
+                                period = gdf["Period"].dropna().astype(str).iloc[0]
+                            if "Room" in gdf.columns and gdf["Room"].notna().any():
+                                room = gdf["Room"].dropna().astype(str).iloc[0]
 
-                        # Guard: avoid empty packets
+                            sec_folder = _section_folder_label(sec, period=period, room=room)
+
+                            t_growth = (
+                                gdf.drop(columns=[c for c in drop_cols_base if c in gdf.columns])
+                                .drop_duplicates(subset=["StudentIdentifier", "AssessmentName"], keep="first")
+                                .copy()
+                            )
+                            if t_growth.empty:
+                                continue
+
+                            combined_pdf, individual = make_student_packets(
+                                t_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice
+                            )
+                            summary_pdf = make_summary_pdf(
+                                t_growth, a, w1, w2, teacher_label=t, subject_label=subject_choice
+                            )
+                            add_teacher_assessment_to_zip(
+                                z, t, subject_choice, a, combined_pdf, summary_pdf, individual, section_folder=sec_folder
+                            )
+
+                            done += 1
+                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+
+                    else:
+                        # Original teacher-only folders
+                        for t, t_df in assigned.groupby("TeacherName", sort=True):
+                            t_growth = (
+                                t_df.drop(columns=[c for c in drop_cols_base if c in t_df.columns])
+                                .drop_duplicates(subset=["StudentIdentifier", "AssessmentName"], keep="first")
+                                .copy()
+                            )
+                            if t_growth.empty:
+                                continue
+
+                            combined_pdf, individual = make_student_packets(
+                                t_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice
+                            )
+                            summary_pdf = make_summary_pdf(
+                                t_growth, a, w1, w2, teacher_label=t, subject_label=subject_choice
+                            )
+                            add_teacher_assessment_to_zip(z, t, subject_choice, a, combined_pdf, summary_pdf, individual)
+
+                            done += 1
+                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+
+            else:
+                # Single teacher export
+                tm_t = teacher_map_join[teacher_map_join["TeacherName"] == teacher_choice].copy()
+
+                for a in assessments_to_run:
+                    a_df = results_df[results_df["AssessmentName"] == a].copy()
+                    if a_df.empty:
+                        continue
+
+                    a_growth = build_growth_table(a_df, w1, w2)
+
+                    assigned = a_growth.merge(tm_t, on="StudentIdentifier", how="inner")
+                    if assigned.empty:
+                        continue
+
+                    if split_by_section:
+                        for sec, gdf in assigned.groupby("SectionNumber", sort=True):
+                            period = None
+                            room = None
+                            if "Period" in gdf.columns and gdf["Period"].notna().any():
+                                period = gdf["Period"].dropna().astype(str).iloc[0]
+                            if "Room" in gdf.columns and gdf["Room"].notna().any():
+                                room = gdf["Room"].dropna().astype(str).iloc[0]
+
+                            sec_folder = _section_folder_label(sec, period=period, room=room)
+
+                            t_growth = (
+                                gdf.drop(columns=[c for c in drop_cols_base if c in gdf.columns])
+                                .drop_duplicates(subset=["StudentIdentifier", "AssessmentName"], keep="first")
+                                .copy()
+                            )
+                            if t_growth.empty:
+                                continue
+
+                            combined_pdf, individual = make_student_packets(
+                                t_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice
+                            )
+                            summary_pdf = make_summary_pdf(
+                                t_growth, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
+                            )
+                            add_teacher_assessment_to_zip(
+                                z, teacher_choice, subject_choice, a, combined_pdf, summary_pdf, individual, section_folder=sec_folder
+                            )
+
+                            done += 1
+                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+
+                    else:
+                        t_growth = (
+                            assigned.drop(columns=[c for c in drop_cols_base if c in assigned.columns])
+                            .drop_duplicates(subset=["StudentIdentifier", "AssessmentName"], keep="first")
+                            .copy()
+                        )
                         if t_growth.empty:
                             continue
 
                         combined_pdf, individual = make_student_packets(
-                            t_growth, w1, w2, thresholds, teacher_label=t, subject_label=subject_choice
+                            t_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice
                         )
                         summary_pdf = make_summary_pdf(
-                            t_growth, a, w1, w2, teacher_label=t, subject_label=subject_choice
+                            t_growth, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
                         )
-                        add_teacher_assessment_to_zip(z, t, subject_choice, a, combined_pdf, summary_pdf, individual)
+                        add_teacher_assessment_to_zip(z, teacher_choice, subject_choice, a, combined_pdf, summary_pdf, individual)
 
                         done += 1
                         prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
-
-            else:
-                # Single teacher: still do assessment-first growth build, then filter
-                teacher_students = teacher_map_sub[teacher_map_sub["TeacherName"] == teacher_choice]["StudentIdentifier"].unique().tolist()
-
-                prog = st.progress(0.0, text="Generating assessment packets…")
-                for i, a in enumerate(assessments_to_run):
-                    a_df = results_df[results_df["AssessmentName"] == a].copy()
-                    if a_df.empty:
-                        prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
-                        continue
-
-                    a_growth = build_growth_table(a_df, w1, w2)
-                    t_growth = a_growth[a_growth["StudentIdentifier"].isin(teacher_students)].copy()
-
-                    if t_growth.empty:
-                        prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
-                        continue
-
-                    combined_pdf, individual = make_student_packets(
-                        t_growth, w1, w2, thresholds, teacher_label=teacher_choice, subject_label=subject_choice
-                    )
-                    summary_pdf = make_summary_pdf(
-                        t_growth, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
-                    )
-                    add_teacher_assessment_to_zip(z, teacher_choice, subject_choice, a, combined_pdf, summary_pdf, individual)
-
-                    prog.progress((i + 1) / max(len(assessments_to_run), 1), text=f"Generating assessment packets… ({i+1}/{len(assessments_to_run)})")
 
     st.success("ZIP created.")
     st.download_button(
