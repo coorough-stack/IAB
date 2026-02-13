@@ -702,8 +702,10 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
                 c.setFillColor(colors.white)
 
             c.setStrokeColor(g_color)
+            c.setFillColor(g_color)
             c.circle(xL, yL, 3, stroke=1, fill=1)
-            c.circle(xR2, yR, 3, stroke=1, fill=1)
+            c.setFillColor(colors.black)
+
         else:
             # Only one point available
             v = bs if bs is not None else fs
