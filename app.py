@@ -17,6 +17,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import os
+import re
 
 # -----------------------------
 # PDF font handling
@@ -247,6 +248,20 @@ def strip_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _norm_school_name(x) -> str:
+    """Normalize SchoolName for joins across sites.
+    Handles small naming differences like 'CK Price Intermediate' vs 'Price Intermediate'.
+    """
+    if pd.isna(x):
+        return ""
+    s = str(x).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"^(ck)\s+", "", s)  # drop leading 'ck '
+    s = re.sub(r"\bschool\b", "", s)  # drop trailing 'school'
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def normalize_results(df: pd.DataFrame) -> pd.DataFrame:
     df = strip_df(df)
 
@@ -303,6 +318,14 @@ def normalize_sectionmap(df: pd.DataFrame) -> pd.DataFrame:
     df["SectionNumber"] = df["SectionNumber"].astype(str)
     df["TeacherName"] = df["TeacherName"].astype(str)
 
+    # Optional school identifiers (recommended when SectionNumber repeats across sites)
+    if "SchoolCode" not in df.columns:
+        df["SchoolCode"] = pd.NA
+    if "SchoolName" not in df.columns:
+        df["SchoolName"] = pd.NA
+    df["SchoolCode"] = df["SchoolCode"].astype(str).replace({"<NA>": pd.NA, "nan": pd.NA, "NaN": pd.NA})
+    df["SchoolNameNorm"] = df["SchoolName"].apply(_norm_school_name)
+
     # Subject can be blank for elementary "homeroom" sections.
     # Treat blank/CORE/HOMEROOM/ELEM/BOTH as "Both" so those students appear in BOTH Math and ELA outputs.
     subj_raw = df["Subject"].fillna("").astype(str).str.strip()
@@ -322,6 +345,7 @@ def normalize_sectionmap(df: pd.DataFrame) -> pd.DataFrame:
 
     df["SubjectNorm"] = subj_norm
     return df
+
 
 
 def normalize_roster(df: pd.DataFrame) -> pd.DataFrame:
@@ -384,8 +408,16 @@ def normalize_roster(df: pd.DataFrame) -> pd.DataFrame:
             if digits_ratio > 0.6:
                 df["SectionNumber"] = df["FirstName"]
 
+    # Optional school identifiers (for disambiguating repeated SectionNumber across schools)
+    if "SchoolCode" not in df.columns:
+        df["SchoolCode"] = pd.NA
+    if "SchoolName" not in df.columns:
+        df["SchoolName"] = pd.NA
+    df["SchoolCode"] = df["SchoolCode"].astype(str).replace({"<NA>": pd.NA, "nan": pd.NA, "NaN": pd.NA})
+    df["SchoolNameNorm"] = df["SchoolName"].apply(_norm_school_name)
+
     # Required final columns
-    need = ["StudentIdentifier", "StudentID", "SectionNumber", "LastName", "FirstName"]
+    need = ["StudentIdentifier", "StudentID", "SectionNumber", "LastName", "FirstName", "SchoolName", "SchoolCode", "SchoolNameNorm"]
     missing = [c for c in need if c not in df.columns]
     if missing:
         raise ValueError(f"Roster CSV couldn't be normalized; missing columns after heuristics: {missing}")
@@ -1320,7 +1352,23 @@ def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame,
             raise ValueError("Roster does not include StudentIdentifier; please upload Crosswalk CSV.")
         roster = roster.merge(crosswalk_df, on="StudentID", how="left")
 
-    m = roster.merge(section[["SectionNumber", "TeacherName", "SubjectNorm"]], on="SectionNumber", how="left")
+    # School-aware join keys to prevent SectionNumber collisions across sites
+    join_on = ["SectionNumber"]
+    if "SchoolCode" in roster.columns and "SchoolCode" in section.columns:
+        if roster["SchoolCode"].notna().any() and section["SchoolCode"].notna().any():
+            join_on = ["SchoolCode", "SectionNumber"]
+    if join_on == ["SectionNumber"]:
+        if "SchoolNameNorm" not in roster.columns:
+            roster["SchoolNameNorm"] = roster.get("SchoolName", pd.NA).apply(_norm_school_name)
+        if "SchoolNameNorm" not in section.columns:
+            section["SchoolNameNorm"] = section.get("SchoolName", pd.NA).apply(_norm_school_name)
+        if (roster["SchoolNameNorm"].isna().all() or (roster["SchoolNameNorm"] == "").all()):
+            uniq = [u for u in section["SchoolNameNorm"].dropna().unique().tolist() if str(u).strip() != ""]
+            if len(uniq) == 1:
+                roster["SchoolNameNorm"] = uniq[0]
+        join_on = ["SchoolNameNorm", "SectionNumber"]
+
+    m = roster.merge(section[[*join_on, "TeacherName", "SubjectNorm"]].drop_duplicates(), on=join_on, how="left")
     out = m[["StudentIdentifier", "TeacherName", "SubjectNorm"]].dropna(subset=["StudentIdentifier", "TeacherName", "SubjectNorm"]).drop_duplicates()
     out["TeacherName"] = out["TeacherName"].astype(str)
     out["SubjectNorm"] = out["SubjectNorm"].astype(str)
@@ -1371,7 +1419,9 @@ def build_exclusion_report(
         xw = pd.DataFrame(columns=["StudentIdentifier", "StudentID"])
 
     # Roster normalized columns (should already be normalized)
-    roster = roster_df[["StudentIdentifier", "StudentID", "SectionNumber"]].copy()
+    # Roster columns (normalized)
+    roster_cols = [c for c in ["StudentIdentifier","StudentID","SectionNumber","SchoolName","SchoolCode","SchoolNameNorm"] if c in roster_df.columns]
+    roster = roster_df[roster_cols].copy()
     roster["StudentIdentifier"] = roster["StudentIdentifier"].astype(str)
     roster["StudentID"] = roster["StudentID"].astype(str)
     roster["SectionNumber"] = roster["SectionNumber"].astype(str)
@@ -1398,10 +1448,26 @@ def build_exclusion_report(
     ).drop_duplicates()
 
     # Join to SectionMap
-    sec = section_df[["SectionNumber", "TeacherName", "SubjectNorm"]].copy()
+    sec_cols = [c for c in ["SectionNumber","TeacherName","SubjectNorm","SchoolName","SchoolCode","SchoolNameNorm"] if c in section_df.columns]
+    sec = section_df[sec_cols].copy()
     sec["SectionNumber"] = sec["SectionNumber"].astype(str)
 
-    m2 = m.merge(sec, on="SectionNumber", how="left")
+    # Join to SectionMap using school-aware keys
+    join_on = ["SectionNumber"]
+    if "SchoolCode" in m.columns and "SchoolCode" in sec.columns:
+        if m["SchoolCode"].notna().any() and sec["SchoolCode"].notna().any():
+            join_on = ["SchoolCode","SectionNumber"]
+    if join_on == ["SectionNumber"]:
+        if "SchoolNameNorm" not in m.columns:
+            m["SchoolNameNorm"] = m.get("SchoolName", pd.NA).apply(_norm_school_name)
+        if "SchoolNameNorm" not in sec.columns:
+            sec["SchoolNameNorm"] = sec.get("SchoolName", pd.NA).apply(_norm_school_name)
+        if (m["SchoolNameNorm"].isna().all() or (m["SchoolNameNorm"] == "").all()):
+            uniq = [u for u in sec["SchoolNameNorm"].dropna().unique().tolist() if str(u).strip() != ""]
+            if len(uniq) == 1:
+                m["SchoolNameNorm"] = uniq[0]
+        join_on = ["SchoolNameNorm","SectionNumber"]
+    m2 = m.merge(sec, on=join_on, how="left")
 
     # Subject filter set (include BOTH)
     if str(subject_choice).upper() == "MATH":
@@ -1427,7 +1493,12 @@ def build_exclusion_report(
         subject_matches = section_rows["SubjectNorm"].astype(str).str.upper().isin(ok_subjects).any() if not section_rows.empty else False
 
         # missing sections in sectionmap
-        missing_in_sectionmap = sorted(set(section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str).tolist()))
+        if "SchoolName" in section_rows.columns and section_rows["SchoolName"].notna().any():
+            missing_in_sectionmap = sorted(set((section_rows.loc[section_rows["TeacherName"].isna(), "SchoolName"].astype(str) + ":" + section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str)).tolist()))
+        elif "SchoolNameNorm" in section_rows.columns and section_rows["SchoolNameNorm"].notna().any():
+            missing_in_sectionmap = sorted(set((section_rows.loc[section_rows["TeacherName"].isna(), "SchoolNameNorm"].astype(str) + ":" + section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str)).tolist()))
+        else:
+            missing_in_sectionmap = sorted(set(section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str).tolist()))
 
         # primary reason
         if not has_roster:
