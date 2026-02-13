@@ -487,7 +487,7 @@ def growth_color(growth: float, thresholds: dict):
 
 
 def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Window, thresholds: dict, teacher_label: str = "", subject_label: str = ""):
-    """Student 1-page PDF with a clean, non-overlapping layout."""
+    """Student-facing 1-page PDF. Uses embedded fonts (when available) and generous spacing to prevent overlap."""
     _init_pdf_fonts()
 
     width, height = letter
@@ -495,7 +495,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     x0 = margin
     xR = width - margin
 
-    # ===== Header band =====
+    # ---------- Header ----------
     header_h = 0.85 * inch
     c.saveState()
     c.setFillColor(colors.black)
@@ -515,17 +515,23 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
         except Exception:
             return "Window"
 
-    # ===== Data fields =====
+    def _fit_bold(text, max_w, start=16, min_size=12):
+        size = start
+        s = str(text)
+        while size > min_size and c.stringWidth(s, PDF_FONT_BOLD, size) > max_w:
+            size -= 1
+        return size
+
+    # ---------- Data ----------
     student_name = f"{row.get('LastName','')}, {row.get('FirstName','')}".strip(", ").strip() or "Student"
     sid = str(row.get("StudentIdentifier","") or "")
     grade = str(row.get("GradeLevelWhenAssessed","") or "")
     schoolyear = str(row.get("SchoolYear","") or "")
     assessment = str(row.get("AssessmentName","") or "")
 
-    # ===== Top cards =====
+    # ---------- Student card ----------
     y_top = height - header_h - 0.35 * inch
 
-    # Student card
     student_h = 1.18 * inch
     student_y = y_top - student_h
     card_w = width - 2 * margin
@@ -536,22 +542,17 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.drawString(x0 + 12, student_y + student_h - 16, "STUDENT")
     c.setFillColor(colors.black)
 
-    # Name auto-fit
-    name_size = 16
-    while name_size > 12 and c.stringWidth(student_name, PDF_FONT_BOLD, name_size) > (card_w - 24):
-        name_size -= 1
+    name_size = _fit_bold(student_name, card_w - 24, start=16, min_size=12)
     c.setFont(PDF_FONT_BOLD, name_size)
-    c.drawString(x0 + 12, student_y + student_h - 40, student_name)
+    c.drawString(x0 + 12, student_y + student_h - 38, student_name)
 
     c.setFont(PDF_FONT_REG, 10)
-    meta1 = f"StudentIdentifier: {sid}   •   Grade: {grade}   •   School Year: {schoolyear}"
-    c.drawString(x0 + 12, student_y + student_h - 58, meta1)
-
+    c.drawString(x0 + 12, student_y + student_h - 56, f"StudentIdentifier: {sid}   •   Grade: {grade}   •   School Year: {schoolyear}")
     if teacher_label:
-        c.drawString(x0 + 12, student_y + student_h - 74, f"Teacher: {teacher_label}   •   Subject: {subject_label}")
+        c.drawString(x0 + 12, student_y + student_h - 72, f"Teacher: {teacher_label}   •   Subject: {subject_label}")
 
-    # Assessment card (separate so it can wrap cleanly)
-    assess_h = 0.78 * inch
+    # ---------- Assessment card ----------
+    assess_h = 0.72 * inch
     assess_y = student_y - 0.18 * inch - assess_h
     _draw_card(c, x0, assess_y, card_w, assess_h, title=None, fill=colors.whitesmoke)
 
@@ -561,24 +562,25 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.setFillColor(colors.black)
 
     c.setFont(PDF_FONT_REG, 11)
-    lines = _wrap_text(c, assessment, max_width=card_w - 24, font_name=PDF_FONT_REG, font_size=11)
+    a_lines = _wrap_text(c, assessment, max_width=card_w - 24, font_name=PDF_FONT_REG, font_size=11)
     y_line = assess_y + assess_h - 38
-    for ln in lines[:2]:
+    for ln in a_lines[:2]:
         c.drawString(x0 + 12, y_line, ln)
         y_line -= 14
 
-    # ===== Score cards row =====
+    # ---------- Score row ----------
     gap = 10
-    sc_w = (width - 2 * margin - 2 * gap) / 3
-    sc_h = 2.18 * inch
-    y_cards_top = assess_y - 0.30 * inch
-    y_cards = y_cards_top - sc_h
+    w3 = (width - 2 * margin - 2 * gap) / 3
+    h3 = 2.15 * inch
+    y_row_top = assess_y - 0.28 * inch
+    y_cards = y_row_top - h3
 
     x1 = x0
-    x2 = x0 + sc_w + gap
-    x3 = x0 + 2 * (sc_w + gap)
+    x2 = x0 + w3 + gap
+    x3 = x0 + 2 * (w3 + gap)
 
-    # Baseline values
+    # Baseline
+    _draw_card(c, x1, y_cards, w3, h3, title=f"Baseline ({_month_label(w1)})", fill=colors.whitesmoke)
     b_date = fmt_date(row.get("BaselineDate", pd.NaT))
     b_score = row.get("BaselineScore", pd.NA)
     b_min = row.get("BaselineBandMin", pd.NA)
@@ -586,7 +588,22 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     b_cat = str(row.get("BaselineCategory","") or "")
     b_status = str(row.get("BaselineStatus","") or "")
 
-    # Follow-up values
+    c.setFont(PDF_FONT_BOLD, 28)
+    c.drawString(x1 + 14, y_cards + h3 - 70, "N/A" if pd.isna(b_score) else f"{int(b_score)}")
+
+    c.setFont(PDF_FONT_REG, 9)
+    c.setFillColor(colors.grey)
+    c.drawString(x1 + 14, y_cards + h3 - 88, f"Window: {w1.start.strftime('%b %d')}–{w1.end.strftime('%b %d')}")
+    c.setFillColor(colors.black)
+
+    c.setFont(PDF_FONT_REG, 10)
+    c.drawString(x1 + 14, y_cards + h3 - 110, f"Date: {b_date}")
+    c.drawString(x1 + 14, y_cards + h3 - 126, f"Error band: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
+    c.drawString(x1 + 14, y_cards + h3 - 142, f"Category: {b_cat}")
+    c.drawString(x1 + 14, y_cards + h3 - 158, f"Status: {b_status}")
+
+    # Follow-up
+    _draw_card(c, x2, y_cards, w3, h3, title=f"Follow-up ({_month_label(w2)})", fill=colors.whitesmoke)
     f_date = fmt_date(row.get("FollowupDate", pd.NaT))
     f_score = row.get("FollowupScore", pd.NA)
     f_min = row.get("FollowupBandMin", pd.NA)
@@ -594,47 +611,29 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     f_cat = str(row.get("FollowupCategory","") or "")
     f_status = str(row.get("FollowupStatus","") or "")
 
-    # --- Baseline card ---
-    _draw_card(c, x1, y_cards, sc_w, sc_h, title=f"Baseline ({_month_label(w1)})", fill=colors.whitesmoke)
     c.setFont(PDF_FONT_BOLD, 28)
-    c.drawString(x1 + 14, y_cards + sc_h - 72, "N/A" if pd.isna(b_score) else f"{int(b_score)}")
+    c.drawString(x2 + 14, y_cards + h3 - 70, "N/A" if pd.isna(f_score) else f"{int(f_score)}")
 
     c.setFont(PDF_FONT_REG, 9)
     c.setFillColor(colors.grey)
-    c.drawString(x1 + 14, y_cards + sc_h - 90, f"Window: {w1.start.strftime('%b %d')}–{w1.end.strftime('%b %d')}")
+    c.drawString(x2 + 14, y_cards + h3 - 88, f"Window: {w2.start.strftime('%b %d')}–{w2.end.strftime('%b %d')}")
     c.setFillColor(colors.black)
 
     c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x1 + 14, y_cards + sc_h - 112, f"Date: {b_date}")
-    c.drawString(x1 + 14, y_cards + sc_h - 128, f"Error band: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
-    c.drawString(x1 + 14, y_cards + sc_h - 144, f"Category: {b_cat}")
-    c.drawString(x1 + 14, y_cards + sc_h - 160, f"Status: {b_status}")
+    c.drawString(x2 + 14, y_cards + h3 - 110, f"Date: {f_date}")
+    c.drawString(x2 + 14, y_cards + h3 - 126, f"Error band: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
+    c.drawString(x2 + 14, y_cards + h3 - 142, f"Category: {f_cat}")
+    c.drawString(x2 + 14, y_cards + h3 - 158, f"Status: {f_status}")
 
-    # --- Follow-up card ---
-    _draw_card(c, x2, y_cards, sc_w, sc_h, title=f"Follow-up ({_month_label(w2)})", fill=colors.whitesmoke)
-    c.setFont(PDF_FONT_BOLD, 28)
-    c.drawString(x2 + 14, y_cards + sc_h - 72, "N/A" if pd.isna(f_score) else f"{int(f_score)}")
-
-    c.setFont(PDF_FONT_REG, 9)
-    c.setFillColor(colors.grey)
-    c.drawString(x2 + 14, y_cards + sc_h - 90, f"Window: {w2.start.strftime('%b %d')}–{w2.end.strftime('%b %d')}")
-    c.setFillColor(colors.black)
-
-    c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x2 + 14, y_cards + sc_h - 112, f"Date: {f_date}")
-    c.drawString(x2 + 14, y_cards + sc_h - 128, f"Error band: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
-    c.drawString(x2 + 14, y_cards + sc_h - 144, f"Category: {f_cat}")
-    c.drawString(x2 + 14, y_cards + sc_h - 160, f"Status: {f_status}")
-
-    # --- Growth card ---
-    _draw_card(c, x3, y_cards, sc_w, sc_h, title="Growth", fill=colors.whitesmoke)
+    # Growth
+    _draw_card(c, x3, y_cards, w3, h3, title="Growth", fill=colors.whitesmoke)
     g = row.get("Growth", pd.NA)
     g_color = growth_color(g, thresholds)
 
     pill_h = 0.82 * inch
-    pill_w = sc_w - 28
+    pill_w = w3 - 28
     pill_x = x3 + 14
-    pill_y = y_cards + sc_h - 120  # bottom of pill
+    pill_y = y_cards + h3 - 118
 
     c.saveState()
     c.setFillColor(g_color)
@@ -647,20 +646,19 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
 
     c.setFont(PDF_FONT_REG, 9)
     c.setFillColor(colors.grey)
-    c.drawCentredString(x3 + sc_w / 2, pill_y - 14, "Points (Follow-up − Baseline)")
+    c.drawCentredString(x3 + w3 / 2, pill_y - 14, "Points (Follow-up − Baseline)")
     c.setFillColor(colors.black)
 
     if (not pd.isna(b_score)) and (not pd.isna(f_score)):
         c.setFont(PDF_FONT_BOLD, 12)
-        c.drawCentredString(x3 + sc_w / 2, pill_y - 34, f"{int(b_score)}  →  {int(f_score)}")
+        c.drawCentredString(x3 + w3 / 2, pill_y - 34, f"{int(b_score)}  →  {int(f_score)}")
 
-    # ===== Footer (single, wrapped) =====
+    # ---------- Footer (single) ----------
     footer = (
         f"Baseline window: {w1.start.strftime('%b %d, %Y')}–{w1.end.strftime('%b %d, %Y')}  •  "
         f"Follow-up window: {w2.start.strftime('%b %d, %Y')}–{w2.end.strftime('%b %d, %Y')}  •  "
         f"Highlight: Green ≥ {thresholds['green_min']}  •  Gold ≥ {thresholds['yellow_min']}  •  Red ≤ {thresholds['red_max']}"
     )
-
     c.setFont(PDF_FONT_REG, 8.5)
     c.setFillColor(colors.grey)
     flines = _wrap_text(c, footer, max_width=(width - 2 * margin), font_name=PDF_FONT_REG, font_size=8.5)
@@ -668,57 +666,6 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     for i, ln in enumerate(flines[:3]):
         c.drawString(x0, y_footer - 10 * i, ln)
     c.setFillColor(colors.black)
-
-
-
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(left, top, "IAB/FIAB Progress Report")
-
-    c.setFont("Helvetica", 11)
-    c.drawString(left, top - 22, f"Student: {row.get('LastName','')}, {row.get('FirstName','')}")
-    c.drawString(left, top - 38, f"StudentIdentifier: {row.get('StudentIdentifier','')}")
-    if teacher_label:
-        c.drawString(left, top - 54, f"Teacher: {teacher_label}    Subject: {subject_label}")
-        y_shift = 0
-    else:
-        y_shift = -16
-
-    c.drawString(left, top - 54 + y_shift, f"Assessment: {row.get('AssessmentName','')}")
-    c.drawString(left, top - 70 + y_shift, f"SchoolYear: {row.get('SchoolYear','')}    Grade: {row.get('GradeLevelWhenAssessed','')}")
-
-    # Baseline
-    y = top - 110 + y_shift
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(left, y, f"Baseline Window ({w1.start.strftime('%b %d, %Y')} – {w1.end.strftime('%b %d, %Y')})")
-    c.setFont("Helvetica", 11)
-    c.drawString(left, y - 18, f"Date: {fmt_date(row.get('BaselineDate', pd.NaT))}")
-    c.drawString(left, y - 34, f"Score: {row.get('BaselineScore','N/A')}")
-    c.drawString(left, y - 50, f"Error Band: {row.get('BaselineBandMin','')} – {row.get('BaselineBandMax','')}")
-    c.drawString(left, y - 66, f"Reporting Category: {row.get('BaselineCategory','')}")
-    c.drawString(left, y - 82, f"Status: {row.get('BaselineStatus','')}")
-
-    # Follow-up
-    y2 = y - 125
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(left, y2, f"Follow-up Window ({w2.start.strftime('%b %d, %Y')} – {w2.end.strftime('%b %d, %Y')})")
-    c.setFont("Helvetica", 11)
-    c.drawString(left, y2 - 18, f"Date: {fmt_date(row.get('FollowupDate', pd.NaT))}")
-    c.drawString(left, y2 - 34, f"Score: {row.get('FollowupScore','N/A')}")
-    c.drawString(left, y2 - 50, f"Error Band: {row.get('FollowupBandMin','')} – {row.get('FollowupBandMax','')}")
-    c.drawString(left, y2 - 66, f"Reporting Category: {row.get('FollowupCategory','')}")
-    c.drawString(left, y2 - 82, f"Status: {row.get('FollowupStatus','')}")
-
-    # Growth
-    y3 = y2 - 125
-    g = row.get("Growth", None)
-    gtxt = "N/A" if pd.isna(g) else f"{int(g):+d}"
-    c.setFont("Helvetica-Bold", 14)
-    c.setFillColor(growth_color(g, thresholds))
-    c.drawString(left, y3, f"Growth (Follow-up − Baseline): {gtxt}")
-    c.setFillColor(colors.black)
-
-    c.setFont("Helvetica-Oblique", 9)
-    c.drawString(left, 0.6 * inch, "Note: Growth compares the same assessment taken in two windows during the school year.")
 
 
 def make_single_student_pdf(row: pd.Series, w1: Window, w2: Window, thresholds: dict, teacher_label: str = "", subject_label: str = "") -> bytes:
