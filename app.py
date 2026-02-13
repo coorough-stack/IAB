@@ -672,6 +672,35 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
             yR = _mapy(fs)
 
             c.line(xL, yL, xR2, yR)
+
+            # Arrowhead on the right end of the sparkline
+            dx = xR2 - xL
+            dy = yR - yL
+            L = (dx * dx + dy * dy) ** 0.5
+            if L > 0:
+                ux = dx / L
+                uy = dy / L
+                arrow_len = 10
+                arrow_w = 5
+                xb = xR2 - ux * arrow_len
+                yb = yR - uy * arrow_len
+                px = -uy
+                py = ux
+                xA = xb + px * arrow_w
+                yA = yb + py * arrow_w
+                xB = xb - px * arrow_w
+                yB = yb - py * arrow_w
+
+                pth = c.beginPath()
+                pth.moveTo(xR2, yR)
+                pth.lineTo(xA, yA)
+                pth.lineTo(xB, yB)
+                pth.close()
+                c.setFillColor(g_color)
+                c.setStrokeColor(g_color)
+                c.drawPath(pth, stroke=0, fill=1)
+                c.setFillColor(colors.white)
+
             c.setStrokeColor(g_color)
             c.circle(xL, yL, 3, stroke=1, fill=1)
             c.circle(xR2, yR, 3, stroke=1, fill=1)
