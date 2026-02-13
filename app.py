@@ -571,8 +571,8 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     # ---------- Score row ----------
     gap = 10
     w3 = (width - 2 * margin - 2 * gap) / 3
-    h3 = 2.15 * inch
-    y_row_top = assess_y - 0.28 * inch
+    h3 = 2.35 * inch
+    y_row_top = assess_y - 0.08 * inch
     y_cards = y_row_top - h3
 
     x1 = x0
