@@ -11,6 +11,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -45,6 +46,99 @@ def _init_pdf_fonts():
                 return
             except Exception:
                 pass
+
+
+# -----------------------------
+# Branding (optional banner image at top of each PDF page)
+# Put your banner image in the repo at: assets/OUSD.png
+# You can override the path with env var BRAND_BANNER_PATH
+# -----------------------------
+BRAND_BANNER_PATH = os.environ.get("BRAND_BANNER_PATH", "assets/OUSD.png")
+_BRAND_CACHE = {"img": None, "size": None, "path": None}
+
+def _load_brand_banner():
+    """Returns (ImageReader, (w,h)) or (None, None) if not found."""
+    if _BRAND_CACHE["img"] is not None:
+        return _BRAND_CACHE["img"], _BRAND_CACHE["size"]
+    base_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+    cand = os.path.join(base_dir, BRAND_BANNER_PATH)
+    if not os.path.exists(cand):
+        _BRAND_CACHE["img"] = None
+        _BRAND_CACHE["size"] = None
+        _BRAND_CACHE["path"] = None
+        return None, None
+    try:
+        img = ImageReader(cand)
+        _BRAND_CACHE["img"] = img
+        _BRAND_CACHE["size"] = img.getSize()
+        _BRAND_CACHE["path"] = cand
+        return img, _BRAND_CACHE["size"]
+    except Exception:
+        _BRAND_CACHE["img"] = None
+        _BRAND_CACHE["size"] = None
+        _BRAND_CACHE["path"] = None
+        return None, None
+
+def _draw_brand_banner(c: canvas.Canvas, page_w: float, page_h: float, max_h: float = 0.65 * inch) -> float:
+    """
+    Draws the district banner at the very top of the page if available.
+    Returns the y-coordinate of the bottom of the banner (or page_h if none).
+    """
+    img, size = _load_brand_banner()
+    if img is None or not size:
+        return page_h
+    iw, ih = size
+    if not iw or not ih:
+        return page_h
+
+    aspect = iw / ih
+    draw_w = page_w
+    draw_h = draw_w / aspect
+
+    if draw_h > max_h:
+        draw_h = max_h
+        draw_w = draw_h * aspect
+
+    x = (page_w - draw_w) / 2
+    y = page_h - draw_h
+    try:
+        c.drawImage(img, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+        return y
+    except Exception:
+        return page_h
+
+def _draw_report_header(c: canvas.Canvas, title: str, right_title: str = "", right_sub: str = "") -> float:
+    """
+    Draws (optional) banner + black title bar. Returns y-coordinate just below the title bar.
+    """
+    width, height = letter
+    margin = 0.70 * inch
+    x0 = margin
+    xR = width - margin
+
+    banner_bottom = _draw_brand_banner(c, width, height)  # y of bottom of banner (or height)
+
+    bar_h = 0.62 * inch
+    bar_top = banner_bottom
+    bar_bottom = bar_top - bar_h
+
+    c.saveState()
+    c.setFillColor(colors.black)
+    c.rect(0, bar_bottom, width, bar_h, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont(PDF_FONT_BOLD, 16)
+    c.drawString(x0, bar_top - 0.34 * inch, title)
+    if right_title:
+        c.setFont(PDF_FONT_REG, 10)
+        c.drawRightString(xR, bar_top - 0.34 * inch, right_title)
+    if right_sub:
+        c.setFont(PDF_FONT_REG, 8.5)
+        c.setFillColor(colors.lightgrey)
+        c.drawRightString(xR, bar_top - 0.54 * inch, right_sub)
+        c.setFillColor(colors.white)
+    c.restoreState()
+
+    return bar_bottom
 
 try:
     from PyPDF2 import PdfMerger
@@ -494,22 +588,13 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     margin = 0.70 * inch
     x0 = margin
     xR = width - margin
-
     # ---------- Header ----------
-    header_h = 0.85 * inch
-    c.saveState()
-    c.setFillColor(colors.black)
-    c.rect(0, height - header_h, width, header_h, stroke=0, fill=1)
-    c.setFillColor(colors.white)
-    c.setFont(PDF_FONT_BOLD, 16)
-    c.drawString(x0, height - 0.52 * inch, "IAB/FIAB Growth Report")
-    c.setFont(PDF_FONT_REG, 10)
-    c.drawRightString(xR, height - 0.52 * inch, "Latest attempt in each window")
-    c.setFont(PDF_FONT_REG, 8.5)
-    c.setFillColor(colors.lightgrey)
-    c.drawRightString(xR, height - 0.68 * inch, f"Generated: {datetime.now().strftime('%b %d, %Y')} • Source: CA Interim (IAB/FIAB)")
-    c.setFillColor(colors.white)
-    c.restoreState()
+    header_bottom = _draw_report_header(
+        c,
+        title="IAB/FIAB Growth Report",
+        right_title="Latest attempt in each window",
+        right_sub=f"Generated: {datetime.now().strftime('%b %d, %Y')} • Source: CA Interim (IAB/FIAB)",
+    )
 
     def _month_label(w: Window) -> str:
         try:
@@ -534,7 +619,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     assessment = str(row.get("AssessmentName","") or "")
 
     # ---------- Student card ----------
-    y_top = height - header_h - 0.35 * inch
+    y_top = header_bottom - 0.35 * inch
 
     student_h = 1.18 * inch
     student_y = y_top - student_h
@@ -828,16 +913,21 @@ def make_student_packets(growth_df: pd.DataFrame, w1: Window, w2: Window, thresh
 
 def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, w2: Window, teacher_label: str = "", subject_label: str = "") -> bytes:
     df = growth_df.copy()
+    _init_pdf_fonts()
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
     left = 0.75 * inch
-    top = height - 0.75 * inch
+    header_bottom = _draw_report_header(
+        c,
+        title="Teacher/Class Summary",
+        right_title="",
+        right_sub=f"Generated: {datetime.now().strftime('%b %d, %Y')}",
+    )
+    top = header_bottom - 0.55 * inch
 
     # Page 1
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(left, top, "Teacher/Class Summary")
-    c.setFont("Helvetica", 11)
+    c.setFont(PDF_FONT_REG, 11)
     if teacher_label:
         c.drawString(left, top - 22, f"Teacher: {teacher_label}    Subject: {subject_label}")
         y0 = top - 38
@@ -869,9 +959,9 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
             ("1 to 19", ((g >= 1) & (g <= 19)).sum()),
             (">= 20", (g >= 20).sum()),
         ]
-        c.setFont("Helvetica-Bold", 12)
+        c.setFont(PDF_FONT_BOLD, 12)
         c.drawString(left, y, "Growth Distribution")
-        c.setFont("Helvetica", 11)
+        c.setFont(PDF_FONT_REG, 11)
         y -= 18
         for label, cnt in buckets:
             c.drawString(left, y, f"{label}: {cnt}")
@@ -882,9 +972,14 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     c.showPage()
 
     # Page 2 - Demographics
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(left, top, "Demographics Summary (Growth)")
-    c.setFont("Helvetica", 11)
+    header_bottom = _draw_report_header(
+        c,
+        title="Demographics Summary (Growth)",
+        right_title="",
+        right_sub=f"Generated: {datetime.now().strftime('%b %d, %Y')}",
+    )
+    top = header_bottom - 0.55 * inch
+    c.setFont(PDF_FONT_REG, 11)
     if teacher_label:
         c.drawString(left, top - 22, f"Teacher: {teacher_label}    Subject: {subject_label}")
         y0 = top - 38
@@ -894,9 +989,9 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
 
     y = y0 - 30
     # ELAS
-    c.setFont("Helvetica-Bold", 12)
+    c.setFont(PDF_FONT_BOLD, 12)
     c.drawString(left, y, "EnglishLanguageAcquisitionStatus")
-    c.setFont("Helvetica", 11)
+    c.setFont(PDF_FONT_REG, 11)
     y -= 16
     if "EnglishLanguageAcquisitionStatus" in df.columns:
         for val, sub in df.groupby("EnglishLanguageAcquisitionStatus", dropna=False):
@@ -911,9 +1006,9 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
 
     y -= 10
     # Hispanic
-    c.setFont("Helvetica-Bold", 12)
+    c.setFont(PDF_FONT_BOLD, 12)
     c.drawString(left, y, "HispanicOrLatinoEthnicity")
-    c.setFont("Helvetica", 11)
+    c.setFont(PDF_FONT_REG, 11)
     y -= 16
     if "HispanicOrLatinoEthnicity" in df.columns:
         for val, sub in df.groupby("HispanicOrLatinoEthnicity", dropna=False):
@@ -928,9 +1023,9 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
 
     y -= 10
     # Race flags
-    c.setFont("Helvetica-Bold", 12)
+    c.setFont(PDF_FONT_BOLD, 12)
     c.drawString(left, y, "Race Flags (counts)")
-    c.setFont("Helvetica", 11)
+    c.setFont(PDF_FONT_REG, 11)
     y -= 16
     race_flags = [
         "AmericanIndianOrAlaskaNative",
