@@ -1,5 +1,12 @@
 import io
 import zipfile
+import os
+from pathlib import Path
+
+try:
+    from google.cloud import storage
+except Exception:
+    storage = None
 from dataclasses import dataclass
 from datetime import date, datetime
 from calendar import monthrange
@@ -17,7 +24,6 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import os
-import re
 
 # -----------------------------
 # PDF font handling
@@ -218,6 +224,84 @@ def read_csv_bytes(raw: bytes) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(raw), dtype=str, encoding_errors="replace")
 
 
+
+# -----------------------------
+# Reference-data auto load (GCS / assets)
+# -----------------------------
+
+def _norm_school_name(s: str) -> str:
+    s = str(s or "").strip().lower()
+    s = " ".join(s.split())
+    return s
+
+@st.cache_data(show_spinner=False)
+def _read_local_bytes(path_str: str) -> bytes:
+    return Path(path_str).read_bytes()
+
+@st.cache_data(show_spinner=False)
+def _download_gcs_bytes(bucket: str, blob: str) -> bytes:
+    if storage is None:
+        raise RuntimeError("google-cloud-storage is not installed in this runtime.")
+    client = storage.Client()
+    return client.bucket(bucket).blob(blob).download_as_bytes()
+
+def _try_load_reference_raw():
+    """Return (roster_raw, crosswalk_raw, section_raw, status_dict)."""
+    status = {"source": None, "details": {}}
+
+    bucket = os.environ.get("IAB_DATA_BUCKET", "").strip()
+    roster_obj = os.environ.get("IAB_ROSTER_OBJECT", "roster.csv").strip()
+    crosswalk_obj = os.environ.get("IAB_CROSSWALK_OBJECT", "crosswalk.csv").strip()
+    section_obj = os.environ.get("IAB_SECTIONMAP_OBJECT", "sectionmap.csv").strip()
+
+    roster_raw = crosswalk_raw = section_raw = None
+
+    if bucket:
+        try:
+            roster_raw = _download_gcs_bytes(bucket, roster_obj)
+            status["details"]["Roster"] = f"GCS: gs://{bucket}/{roster_obj}"
+        except Exception as e:
+            status["details"]["Roster"] = f"GCS load failed: {e}"
+
+        try:
+            crosswalk_raw = _download_gcs_bytes(bucket, crosswalk_obj)
+            status["details"]["Crosswalk"] = f"GCS: gs://{bucket}/{crosswalk_obj}"
+        except Exception as e:
+            status["details"]["Crosswalk"] = f"GCS load failed: {e}"
+
+        try:
+            section_raw = _download_gcs_bytes(bucket, section_obj)
+            status["details"]["SectionMap"] = f"GCS: gs://{bucket}/{section_obj}"
+        except Exception as e:
+            status["details"]["SectionMap"] = f"GCS load failed: {e}"
+
+        if roster_raw is not None and section_raw is not None:
+            status["source"] = "gcs"
+
+    # Fallback to local assets (dev only)
+    if status["source"] is None:
+        assets_dir = Path(__file__).parent / "assets"
+        for key, fname in [("Roster","roster.csv"), ("Crosswalk","crosswalk.csv"), ("SectionMap","sectionmap.csv")]:
+            try:
+                raw = _read_local_bytes(str(assets_dir / fname))
+                if key == "Roster":
+                    roster_raw = raw
+                elif key == "Crosswalk":
+                    crosswalk_raw = raw
+                else:
+                    section_raw = raw
+                status["details"][key] = f"assets/{fname}"
+            except Exception:
+                pass
+
+        if roster_raw is not None and section_raw is not None:
+            status["source"] = "assets"
+
+    return roster_raw, crosswalk_raw, section_raw, status
+
+
+
+
 @st.cache_data(show_spinner=False)
 def normalize_results_cached(raw: bytes) -> pd.DataFrame:
     return normalize_results(read_csv_bytes(raw))
@@ -246,20 +330,6 @@ def strip_df(df: pd.DataFrame) -> pd.DataFrame:
             # restore real NaNs from "nan"
             df[c] = df[c].replace({"nan": pd.NA, "NaN": pd.NA, "None": pd.NA, "": pd.NA})
     return df
-
-
-def _norm_school_name(x) -> str:
-    """Normalize SchoolName for joins across sites.
-    Handles small naming differences like 'CK Price Intermediate' vs 'Price Intermediate'.
-    """
-    if pd.isna(x):
-        return ""
-    s = str(x).strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"^(ck)\s+", "", s)  # drop leading 'ck '
-    s = re.sub(r"\bschool\b", "", s)  # drop trailing 'school'
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
 
 
 def normalize_results(df: pd.DataFrame) -> pd.DataFrame:
@@ -318,13 +388,12 @@ def normalize_sectionmap(df: pd.DataFrame) -> pd.DataFrame:
     df["SectionNumber"] = df["SectionNumber"].astype(str)
     df["TeacherName"] = df["TeacherName"].astype(str)
 
-    # Optional school identifiers (recommended when SectionNumber repeats across sites)
-    if "SchoolCode" not in df.columns:
-        df["SchoolCode"] = pd.NA
-    if "SchoolName" not in df.columns:
-        df["SchoolName"] = pd.NA
-    df["SchoolCode"] = df["SchoolCode"].astype(str).replace({"<NA>": pd.NA, "nan": pd.NA, "NaN": pd.NA})
-    df["SchoolNameNorm"] = df["SchoolName"].apply(_norm_school_name)
+    # Optional school/site identifier columns (recommended when section numbers collide across schools)
+    if "SchoolCode" in df.columns:
+        df["SchoolCode"] = df["SchoolCode"].astype(str)
+    if "SchoolName" in df.columns:
+        df["SchoolName"] = df["SchoolName"].astype(str)
+        df["SchoolNameNorm"] = df["SchoolName"].map(_norm_school_name)
 
     # Subject can be blank for elementary "homeroom" sections.
     # Treat blank/CORE/HOMEROOM/ELEM/BOTH as "Both" so those students appear in BOTH Math and ELA outputs.
@@ -345,7 +414,6 @@ def normalize_sectionmap(df: pd.DataFrame) -> pd.DataFrame:
 
     df["SubjectNorm"] = subj_norm
     return df
-
 
 
 def normalize_roster(df: pd.DataFrame) -> pd.DataFrame:
@@ -407,26 +475,33 @@ def normalize_roster(df: pd.DataFrame) -> pd.DataFrame:
             digits_ratio = df["FirstName"].astype(str).str.fullmatch(r"\d+").mean()
             if digits_ratio > 0.6:
                 df["SectionNumber"] = df["FirstName"]
-
-    # Optional school identifiers (for disambiguating repeated SectionNumber across schools)
-    if "SchoolCode" not in df.columns:
-        df["SchoolCode"] = pd.NA
-    if "SchoolName" not in df.columns:
-        df["SchoolName"] = pd.NA
-    df["SchoolCode"] = df["SchoolCode"].astype(str).replace({"<NA>": pd.NA, "nan": pd.NA, "NaN": pd.NA})
-    df["SchoolNameNorm"] = df["SchoolName"].apply(_norm_school_name)
-
     # Required final columns
-    need = ["StudentIdentifier", "StudentID", "SectionNumber", "LastName", "FirstName", "SchoolName", "SchoolCode", "SchoolNameNorm"]
+    need = ["StudentIdentifier", "StudentID", "SectionNumber", "LastName", "FirstName"]
     missing = [c for c in need if c not in df.columns]
     if missing:
         raise ValueError(f"Roster CSV couldn't be normalized; missing columns after heuristics: {missing}")
+
+    # Optional school/site identifier columns (recommended when section numbers collide across schools)
+    if "SchoolCode" in df.columns:
+        df["SchoolCode"] = df["SchoolCode"].astype(str)
+    if "SchoolName" in df.columns:
+        df["SchoolName"] = df["SchoolName"].astype(str)
+        df["SchoolNameNorm"] = df["SchoolName"].map(_norm_school_name)
 
     df["StudentIdentifier"] = df["StudentIdentifier"].astype(str)
     df["StudentID"] = df["StudentID"].astype(str)
     df["SectionNumber"] = df["SectionNumber"].astype(str)
 
-    return df[need]
+    out_cols = need.copy()
+    if "SchoolCode" in df.columns:
+        out_cols.append("SchoolCode")
+    if "SchoolName" in df.columns:
+        out_cols.append("SchoolName")
+    if "SchoolNameNorm" in df.columns:
+        out_cols.append("SchoolNameNorm")
+
+    return df[out_cols]
+
 
 
 # -----------------------------
@@ -1351,24 +1426,19 @@ def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame,
         if crosswalk_df is None:
             raise ValueError("Roster does not include StudentIdentifier; please upload Crosswalk CSV.")
         roster = roster.merge(crosswalk_df, on="StudentID", how="left")
+        # Choose join key to avoid section collisions across schools
+        join_keys = ["SectionNumber"]
+        if "SchoolCode" in roster.columns and "SchoolCode" in section.columns:
+            if roster["SchoolCode"].fillna("").astype(str).str.strip().ne("").any() and section["SchoolCode"].fillna("").astype(str).str.strip().ne("").any():
+                join_keys = ["SchoolCode", "SectionNumber"]
+        if join_keys == ["SectionNumber"]:
+            if "SchoolNameNorm" in roster.columns and "SchoolNameNorm" in section.columns:
+                if roster["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any() and section["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any():
+                    join_keys = ["SchoolNameNorm", "SectionNumber"]
 
-    # School-aware join keys to prevent SectionNumber collisions across sites
-    join_on = ["SectionNumber"]
-    if "SchoolCode" in roster.columns and "SchoolCode" in section.columns:
-        if roster["SchoolCode"].notna().any() and section["SchoolCode"].notna().any():
-            join_on = ["SchoolCode", "SectionNumber"]
-    if join_on == ["SectionNumber"]:
-        if "SchoolNameNorm" not in roster.columns:
-            roster["SchoolNameNorm"] = roster.get("SchoolName", pd.NA).apply(_norm_school_name)
-        if "SchoolNameNorm" not in section.columns:
-            section["SchoolNameNorm"] = section.get("SchoolName", pd.NA).apply(_norm_school_name)
-        if (roster["SchoolNameNorm"].isna().all() or (roster["SchoolNameNorm"] == "").all()):
-            uniq = [u for u in section["SchoolNameNorm"].dropna().unique().tolist() if str(u).strip() != ""]
-            if len(uniq) == 1:
-                roster["SchoolNameNorm"] = uniq[0]
-        join_on = ["SchoolNameNorm", "SectionNumber"]
-
-    m = roster.merge(section[[*join_on, "TeacherName", "SubjectNorm"]].drop_duplicates(), on=join_on, how="left")
+        sec_cols = join_keys + ["TeacherName", "SubjectNorm"]
+        sec_cols = [c for c in sec_cols if c in section.columns]
+        m = roster.merge(section[sec_cols], on=join_keys, how="left")
     out = m[["StudentIdentifier", "TeacherName", "SubjectNorm"]].dropna(subset=["StudentIdentifier", "TeacherName", "SubjectNorm"]).drop_duplicates()
     out["TeacherName"] = out["TeacherName"].astype(str)
     out["SubjectNorm"] = out["SubjectNorm"].astype(str)
@@ -1419,9 +1489,7 @@ def build_exclusion_report(
         xw = pd.DataFrame(columns=["StudentIdentifier", "StudentID"])
 
     # Roster normalized columns (should already be normalized)
-    # Roster columns (normalized)
-    roster_cols = [c for c in ["StudentIdentifier","StudentID","SectionNumber","SchoolName","SchoolCode","SchoolNameNorm"] if c in roster_df.columns]
-    roster = roster_df[roster_cols].copy()
+    roster = roster_df[["StudentIdentifier", "StudentID", "SectionNumber"]].copy()
     roster["StudentIdentifier"] = roster["StudentIdentifier"].astype(str)
     roster["StudentID"] = roster["StudentID"].astype(str)
     roster["SectionNumber"] = roster["SectionNumber"].astype(str)
@@ -1448,26 +1516,10 @@ def build_exclusion_report(
     ).drop_duplicates()
 
     # Join to SectionMap
-    sec_cols = [c for c in ["SectionNumber","TeacherName","SubjectNorm","SchoolName","SchoolCode","SchoolNameNorm"] if c in section_df.columns]
-    sec = section_df[sec_cols].copy()
+    sec = section_df[["SectionNumber", "TeacherName", "SubjectNorm"]].copy()
     sec["SectionNumber"] = sec["SectionNumber"].astype(str)
 
-    # Join to SectionMap using school-aware keys
-    join_on = ["SectionNumber"]
-    if "SchoolCode" in m.columns and "SchoolCode" in sec.columns:
-        if m["SchoolCode"].notna().any() and sec["SchoolCode"].notna().any():
-            join_on = ["SchoolCode","SectionNumber"]
-    if join_on == ["SectionNumber"]:
-        if "SchoolNameNorm" not in m.columns:
-            m["SchoolNameNorm"] = m.get("SchoolName", pd.NA).apply(_norm_school_name)
-        if "SchoolNameNorm" not in sec.columns:
-            sec["SchoolNameNorm"] = sec.get("SchoolName", pd.NA).apply(_norm_school_name)
-        if (m["SchoolNameNorm"].isna().all() or (m["SchoolNameNorm"] == "").all()):
-            uniq = [u for u in sec["SchoolNameNorm"].dropna().unique().tolist() if str(u).strip() != ""]
-            if len(uniq) == 1:
-                m["SchoolNameNorm"] = uniq[0]
-        join_on = ["SchoolNameNorm","SectionNumber"]
-    m2 = m.merge(sec, on=join_on, how="left")
+    m2 = m.merge(sec, on="SectionNumber", how="left")
 
     # Subject filter set (include BOTH)
     if str(subject_choice).upper() == "MATH":
@@ -1493,12 +1545,7 @@ def build_exclusion_report(
         subject_matches = section_rows["SubjectNorm"].astype(str).str.upper().isin(ok_subjects).any() if not section_rows.empty else False
 
         # missing sections in sectionmap
-        if "SchoolName" in section_rows.columns and section_rows["SchoolName"].notna().any():
-            missing_in_sectionmap = sorted(set((section_rows.loc[section_rows["TeacherName"].isna(), "SchoolName"].astype(str) + ":" + section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str)).tolist()))
-        elif "SchoolNameNorm" in section_rows.columns and section_rows["SchoolNameNorm"].notna().any():
-            missing_in_sectionmap = sorted(set((section_rows.loc[section_rows["TeacherName"].isna(), "SchoolNameNorm"].astype(str) + ":" + section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str)).tolist()))
-        else:
-            missing_in_sectionmap = sorted(set(section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str).tolist()))
+        missing_in_sectionmap = sorted(set(section_rows.loc[section_rows["TeacherName"].isna(), "SectionNumber"].astype(str).tolist()))
 
         # primary reason
         if not has_roster:
@@ -1549,11 +1596,38 @@ st.title("IAB/FIAB Progress Reporting (v0.2)")
 st.sidebar.header("Uploads")
 results_file = st.sidebar.file_uploader("Results CSV (required)", type=["csv"], key="results")
 
-multi_mode = st.sidebar.checkbox("Multi-teacher mode (upload roster + section map)", value=True)
+multi_mode = st.sidebar.checkbox("Multi-teacher mode (use stored roster/section map)", value=True)
 
-roster_file = st.sidebar.file_uploader("Roster CSV (Student ↔ Section)", type=["csv"], key="roster") if multi_mode else None
-crosswalk_file = st.sidebar.file_uploader("Crosswalk CSV (StudentIdentifier ↔ StudentID)", type=["csv"], key="crosswalk") if multi_mode else None
-section_file = st.sidebar.file_uploader("SectionMap CSV (Section ↔ Teacher ↔ Subject)", type=["csv"], key="section") if multi_mode else None
+# Reference files (Roster / Crosswalk / SectionMap)
+roster_raw = crosswalk_raw = section_raw = None
+ref_status = None
+
+if multi_mode:
+    st.sidebar.subheader("Reference files")
+    override_ref = st.sidebar.checkbox(
+        "Override reference files (upload manually)",
+        value=False,
+        help="Recommended OFF. Turn ON only for troubleshooting or one-off runs."
+    )
+
+    if not override_ref:
+        roster_raw, crosswalk_raw, section_raw, ref_status = _try_load_reference_raw()
+        if ref_status and ref_status.get("source"):
+            st.sidebar.caption(f"Loaded from: **{ref_status['source'].upper()}**")
+        if ref_status:
+            for k, v in ref_status.get("details", {}).items():
+                st.sidebar.caption(f"{k}: {v}")
+
+    # If override is on OR auto-load failed for required files, show upload widgets
+    if override_ref or (roster_raw is None) or (section_raw is None):
+        st.sidebar.caption("Upload reference files (required for multi-teacher mode)")
+        roster_file = st.sidebar.file_uploader("Roster CSV (Student ↔ Section)", type=["csv"], key="roster")
+        crosswalk_file = st.sidebar.file_uploader("Crosswalk CSV (StudentIdentifier ↔ StudentID)", type=["csv"], key="crosswalk")
+        section_file = st.sidebar.file_uploader("SectionMap CSV (Section ↔ Teacher ↔ Subject)", type=["csv"], key="section")
+
+        roster_raw = roster_file.getvalue() if roster_file else roster_raw
+        crosswalk_raw = crosswalk_file.getvalue() if crosswalk_file else crosswalk_raw
+        section_raw = section_file.getvalue() if section_file else section_raw
 
 if not results_file:
     st.info("Upload a Results CSV to begin.")
@@ -1604,23 +1678,70 @@ subject_choice = None
 teacher_choice = None
 all_teachers = False
 
-if multi_mode and roster_file and section_file:
+if multi_mode and roster_raw and section_raw:
     try:
-        roster_df = normalize_roster_cached(roster_file.getvalue())
-        section_df = normalize_sectionmap_cached(section_file.getvalue())
-        crosswalk_df = normalize_crosswalk_cached(crosswalk_file.getvalue()) if crosswalk_file else None
+        roster_df = normalize_roster_cached(roster_raw)
+        section_df = normalize_sectionmap_cached(section_raw)
+        crosswalk_df = normalize_crosswalk_cached(crosswalk_raw) if crosswalk_raw else None
         teacher_map = build_student_teacher_map(roster_df, section_df, crosswalk_df)
 
-        # Validation: sections in roster missing from SectionMap
-        roster_sections = set(roster_df["SectionNumber"].dropna().astype(str).unique().tolist()) if "SectionNumber" in roster_df.columns else set()
-        mapped_sections = set(section_df["SectionNumber"].dropna().astype(str).unique().tolist()) if "SectionNumber" in section_df.columns else set()
-        missing_sections = sorted(list(roster_sections - mapped_sections))
-        if missing_sections:
-            st.warning(
-                f"{len(missing_sections)} section(s) in the roster are not present in the SectionMap. "
-                "Students in those sections will not be included until SectionMap is updated."
-            )
-            st.dataframe(pd.DataFrame({'Missing SectionNumber': missing_sections}))
+        # Validation: sections in roster missing from SectionMap (school-aware)
+        # Prefer SchoolCode join if present; else SchoolNameNorm; else SectionNumber only.
+        use_schoolcode = (
+            ("SchoolCode" in roster_df.columns) and ("SchoolCode" in section_df.columns)
+            and roster_df["SchoolCode"].fillna("").astype(str).str.strip().ne("").any()
+            and section_df["SchoolCode"].fillna("").astype(str).str.strip().ne("").any()
+        )
+        use_schoolname = (
+            ("SchoolNameNorm" in roster_df.columns) and ("SchoolNameNorm" in section_df.columns)
+            and roster_df["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any()
+            and section_df["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any()
+        )
+
+        if use_schoolcode:
+            roster_keys = set(zip(
+                roster_df["SchoolCode"].fillna("").astype(str).str.strip(),
+                roster_df["SectionNumber"].fillna("").astype(str).str.strip()
+            ))
+            mapped_keys = set(zip(
+                section_df["SchoolCode"].fillna("").astype(str).str.strip(),
+                section_df["SectionNumber"].fillna("").astype(str).str.strip()
+            ))
+            missing_keys = sorted(list(roster_keys - mapped_keys))
+            if missing_keys:
+                st.warning(
+                    f"{len(missing_keys)} roster section(s) are not present in the SectionMap (by SchoolCode+SectionNumber). "
+                    "Students in those sections will be excluded until SectionMap is updated."
+                )
+                st.dataframe(pd.DataFrame(missing_keys[:50], columns=["SchoolCode", "SectionNumber"]))
+        elif use_schoolname:
+            roster_keys = set(zip(
+                roster_df["SchoolNameNorm"].fillna("").astype(str).str.strip(),
+                roster_df["SectionNumber"].fillna("").astype(str).str.strip()
+            ))
+            mapped_keys = set(zip(
+                section_df["SchoolNameNorm"].fillna("").astype(str).str.strip(),
+                section_df["SectionNumber"].fillna("").astype(str).str.strip()
+            ))
+            missing_keys = sorted(list(roster_keys - mapped_keys))
+            if missing_keys:
+                st.warning(
+                    f"{len(missing_keys)} roster section(s) are not present in the SectionMap (by SchoolName+SectionNumber). "
+                    "Students in those sections will be excluded until SectionMap is updated."
+                )
+                # show pretty school name by joining back (optional)
+                st.dataframe(pd.DataFrame(missing_keys[:50], columns=["SchoolNameNorm", "SectionNumber"]))
+        else:
+            roster_sections = set(roster_df["SectionNumber"].dropna().astype(str).unique().tolist()) if "SectionNumber" in roster_df.columns else set()
+            mapped_sections = set(section_df["SectionNumber"].dropna().astype(str).unique().tolist()) if "SectionNumber" in section_df.columns else set()
+            missing_sections = sorted(list(roster_sections - mapped_sections))
+            if missing_sections:
+                st.warning(
+                    f"{len(missing_sections)} section(s) in the roster are not present in the SectionMap. "
+                    "Students in those sections will not be included until SectionMap is updated."
+                )
+                st.dataframe(pd.DataFrame({'Missing SectionNumber': missing_sections[:50]}))
+
 
         st.sidebar.header("Grouping")
         subject_choice = st.sidebar.selectbox("Subject", ["Math", "ELA"], index=0)
@@ -1677,7 +1798,7 @@ if multi_mode and roster_file and section_file:
         teacher_map = None
 
 # Build preview dataframe (depends on mode)
-if teacher_map is None or not multi_mode or not roster_file or not section_file:
+if teacher_map is None or (not multi_mode) or (not roster_raw) or (not section_raw):
     # single-file mode
     growth_df = build_growth_table(results_assess, w1, w2)
     st.caption("Single-file mode: generating one packet from the uploaded Results CSV.")
@@ -1716,8 +1837,8 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
     multi_ready = (
         multi_mode
         and (teacher_map is not None)
-        and (roster_file is not None)
-        and (section_file is not None)
+        and (roster_raw is not None)
+        and (section_raw is not None)
         and (subject_choice is not None)
     )
 
