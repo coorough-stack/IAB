@@ -1101,7 +1101,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
 
         y0 = dist_y + dist_h - 42
         row_h = 18
-        bar_h = 10
+        bar_h = 12
 
         c.setFont(PDF_FONT_REG, 9.2)
         for i, (lab, cnt, col) in enumerate(buckets):
@@ -1110,10 +1110,21 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
             c.setFillColor(colors.black)
             c.drawString(x_label, yy, lab)
             wbar = (cnt / max_cnt) * bar_max_w if max_cnt else 0
+            # Bar
             c.setFillColor(col)
-            c.rect(x_bar, yy - 3, wbar, bar_h, stroke=0, fill=1)
-            c.setFillColor(colors.grey)
-            c.drawRightString(x_bar_max, yy, f"{cnt} ({pct:.0f}%)")
+            bar_y = yy - (bar_h / 2) - 1
+            c.rect(x_bar, bar_y, wbar, bar_h, stroke=0, fill=1)
+
+            # Label: draw inside the bar (black) when the bar reaches the label area
+            label = f"{cnt} ({pct:.0f}%)"
+            lbl_w = c.stringWidth(label, PDF_FONT_REG, 9.2)
+            inside = (wbar >= (bar_max_w - (lbl_w + 10)))
+            if inside:
+                c.setFillColor(colors.black)
+                c.drawRightString(x_bar + wbar - 6, yy - 2, label)
+            else:
+                c.setFillColor(colors.grey)
+                c.drawRightString(x_bar_max, yy, label)
 
         c.setFillColor(colors.black)
 
