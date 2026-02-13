@@ -1075,7 +1075,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     c.setFillColor(colors.black)
 
     # --- Growth distribution chart card ---
-    dist_h = 1.55 * inch
+    dist_h = 1.75 * inch
     dist_y_top = note_y - 0.20 * inch
     dist_y = dist_y_top - dist_h
     _draw_card(c, left, dist_y, usable_w, dist_h, title="Growth Distribution", title_size=12, fill=colors.whitesmoke)
@@ -1139,9 +1139,23 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
         top_drops = df_both.sort_values("Growth", ascending=True).head(4)
 
         def _name(r):
-            ln = str(r.get("LastName", "") or r.get("StudentLastName", "") or "")
-            fn = str(r.get("FirstName", "") or r.get("StudentFirstName", "") or "")
-            return f"{ln}, {fn[:1]}." if fn else ln
+            ln = str(r.get("LastName", "") or r.get("StudentLastName", "") or "").strip()
+            fn = str(r.get("FirstName", "") or r.get("StudentFirstName", "") or "").strip()
+            if fn and ln:
+                return f"{fn} {ln}"
+            return ln or fn
+
+        def _truncate_text(txt: str, max_w: float, font_name: str, font_size: float) -> str:
+            s = str(txt or "")
+            if c.stringWidth(s, font_name, font_size) <= max_w:
+                return s
+            ell = "…"
+            # Trim until it fits
+            lo, hi = 0, len(s)
+            # Simple backwards trim
+            while hi > 0 and c.stringWidth(s[:hi] + ell, font_name, font_size) > max_w:
+                hi -= 1
+            return (s[:hi] + ell) if hi > 0 else ell
 
         def _draw_list(x0, rows):
             yy = movers_y + movers_h - 28
@@ -1165,7 +1179,8 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
 
                 c.setFillColor(colors.black)
                 c.setFont(PDF_FONT_REG, 9.2)
-                c.drawString(x0 + 14, yy, nm)
+                nm_draw = _truncate_text(nm, card_w - 90, PDF_FONT_REG, 9.2)
+                c.drawString(x0 + 14, yy, nm_draw)
                 c.setFont(PDF_FONT_BOLD, 10)
                 c.drawRightString(x0 + card_w - 14, yy, f"{gr_i:+d}")
                 c.setFillColor(colors.grey)
