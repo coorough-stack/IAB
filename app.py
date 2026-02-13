@@ -622,6 +622,26 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     student_name = f"{row.get('LastName','')}, {row.get('FirstName','')}".strip(", ").strip() or "Student"
     sid = str(row.get("StudentIdentifier","") or "")
     grade = str(row.get("GradeLevelWhenAssessed","") or "")
+
+    def _grade_ordinal(g: str) -> str:
+        s = str(g or "").strip()
+        if not s:
+            return ""
+        if s.upper().startswith("G") and len(s) > 1:
+            s = s[1:]
+        if s.upper() in ("K", "KG", "KINDER", "KINDERGARTEN"):
+            return "K"
+        try:
+            n = int(float(s))
+        except Exception:
+            return s
+        if n % 100 in (11, 12, 13):
+            suf = "th"
+        else:
+            suf = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suf}"
+
+    grade_lbl = _grade_ordinal(grade)
     schoolyear = str(row.get("SchoolYear","") or "")
     assessment = str(row.get("AssessmentName","") or "")
 
@@ -643,7 +663,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.drawString(x0 + 12, student_y + student_h - 38, student_name)
 
     c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x0 + 12, student_y + student_h - 56, f"StudentIdentifier: {sid}   •   Grade: {grade}   •   School Year: {schoolyear}")
+    c.drawString(x0 + 12, student_y + student_h - 56, f"SSID: {sid}   •   Grade: {grade_lbl}   •   School Year: {schoolyear}")
     if teacher_label:
         c.drawString(x0 + 12, student_y + student_h - 72, f"Teacher: {teacher_label}   •   Subject: {subject_label}")
 
@@ -689,14 +709,13 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
 
     c.setFont(PDF_FONT_REG, 9)
     c.setFillColor(colors.grey)
-    c.drawString(x1 + 14, y_cards + h3 - 88, f"Window: {w1.start.strftime('%b %d')}–{w1.end.strftime('%b %d')}")
+    c.drawString(x1 + 14, y_cards + h3 - 88, f"Taken: {b_date}")
     c.setFillColor(colors.black)
 
     c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x1 + 14, y_cards + h3 - 110, f"Date: {b_date}")
-    c.drawString(x1 + 14, y_cards + h3 - 126, f"Error band: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
-    c.drawString(x1 + 14, y_cards + h3 - 142, f"Category: {b_cat}")
-    c.drawString(x1 + 14, y_cards + h3 - 158, f"Status: {b_status}")
+    c.drawString(x1 + 14, y_cards + h3 - 110, f"Error band: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
+    c.drawString(x1 + 14, y_cards + h3 - 126, f"Category: {b_cat}")
+    c.drawString(x1 + 14, y_cards + h3 - 142, f"Status: {b_status}")
 
     # Follow-up
     _draw_card(c, x2, y_cards, w3, h3, title=f"Follow-up ({_month_label(w2)})", fill=colors.whitesmoke)
@@ -712,14 +731,13 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
 
     c.setFont(PDF_FONT_REG, 9)
     c.setFillColor(colors.grey)
-    c.drawString(x2 + 14, y_cards + h3 - 88, f"Window: {w2.start.strftime('%b %d')}–{w2.end.strftime('%b %d')}")
+    c.drawString(x2 + 14, y_cards + h3 - 88, f"Taken: {f_date}")
     c.setFillColor(colors.black)
 
     c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x2 + 14, y_cards + h3 - 110, f"Date: {f_date}")
-    c.drawString(x2 + 14, y_cards + h3 - 126, f"Error band: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
-    c.drawString(x2 + 14, y_cards + h3 - 142, f"Category: {f_cat}")
-    c.drawString(x2 + 14, y_cards + h3 - 158, f"Status: {f_status}")
+    c.drawString(x2 + 14, y_cards + h3 - 110, f"Error band: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
+    c.drawString(x2 + 14, y_cards + h3 - 126, f"Category: {f_cat}")
+    c.drawString(x2 + 14, y_cards + h3 - 142, f"Status: {f_status}")
 
     # Growth
     _draw_card(c, x3, y_cards, w3, h3, title="Growth", fill=colors.whitesmoke)
@@ -847,8 +865,8 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
 
     # ---------- Footer (single) ----------
     footer = (
-        f"Baseline window: {w1.start.strftime('%b %d, %Y')}–{w1.end.strftime('%b %d, %Y')}  •  "
-        f"Follow-up window: {w2.start.strftime('%b %d, %Y')}–{w2.end.strftime('%b %d, %Y')}  •  "
+        f"Baseline test date: {('N/A' if b_date in ('', 'N/A') else b_date)}  •  "
+        f"Follow-up test date: {('N/A' if f_date in ('', 'N/A') else f_date)}  •  "
         f"Highlight: Green ≥ {thresholds['green_min']}  •  Gold ≥ {thresholds['yellow_min']}  •  Red ≤ {thresholds['red_max']}"
     )
     c.setFont(PDF_FONT_REG, 8.5)
