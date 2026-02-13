@@ -10,6 +10,7 @@ from dateutil import parser as dtparser
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
+from reportlab.lib.colors import HexColor
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
@@ -54,6 +55,12 @@ def _init_pdf_fonts():
 # You can override the path with env var BRAND_BANNER_PATH
 # -----------------------------
 BRAND_BANNER_PATH = os.environ.get("BRAND_BANNER_PATH", "assets/OUSD.png")
+# Header bar color under the banner (slightly darker OUSD blue).
+# Override in Cloud Run env vars:
+#   HEADER_BAR_COLOR_HEX="#0B5A8A"
+#   HEADER_BAR_TEXT_COLOR_HEX="#FFFFFF"
+HEADER_BAR_COLOR_HEX = os.environ.get("HEADER_BAR_COLOR_HEX", "#0B5A8A")
+HEADER_BAR_TEXT_COLOR_HEX = os.environ.get("HEADER_BAR_TEXT_COLOR_HEX", "#FFFFFF")
 _BRAND_CACHE = {"img": None, "size": None, "path": None}
 
 def _load_brand_banner():
@@ -123,9 +130,9 @@ def _draw_report_header(c: canvas.Canvas, title: str, right_title: str = "", rig
     bar_bottom = bar_top - bar_h
 
     c.saveState()
-    c.setFillColor(colors.black)
+    c.setFillColor(HexColor(HEADER_BAR_COLOR_HEX))
     c.rect(0, bar_bottom, width, bar_h, stroke=0, fill=1)
-    c.setFillColor(colors.white)
+    c.setFillColor(HexColor(HEADER_BAR_TEXT_COLOR_HEX))
     c.setFont(PDF_FONT_BOLD, 16)
     c.drawString(x0, bar_top - 0.34 * inch, title)
     if right_title:
@@ -135,7 +142,7 @@ def _draw_report_header(c: canvas.Canvas, title: str, right_title: str = "", rig
         c.setFont(PDF_FONT_REG, 8.5)
         c.setFillColor(colors.lightgrey)
         c.drawRightString(xR, bar_top - 0.54 * inch, right_sub)
-        c.setFillColor(colors.white)
+        c.setFillColor(HexColor(HEADER_BAR_TEXT_COLOR_HEX))
     c.restoreState()
 
     return bar_bottom
