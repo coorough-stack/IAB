@@ -951,48 +951,239 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     )
     top = header_bottom - 0.55 * inch
 
-    # Page 1
+    # Page 1 (Overview)
     c.setFont(PDF_FONT_REG, 11)
+
+    margin = left
+    right = width - margin
+    usable_w = right - left
+
+    thresholds = GROWTH_THRESHOLDS_DEFAULT
+
+    # --- Meta card (teacher / assessment / windows) ---
+    meta_h = 1.05 * inch
+    meta_y_top = top
+    meta_y = meta_y_top - meta_h
+    _draw_card(c, left, meta_y, usable_w, meta_h, title=None, fill=colors.whitesmoke)
+
+    c.setFillColor(colors.grey)
+    c.setFont(PDF_FONT_BOLD, 9)
+    c.drawString(left + 14, meta_y_top - 18, "CLASS")
+    c.setFillColor(colors.black)
+    c.setFont(PDF_FONT_BOLD, 16)
     if teacher_label:
-        c.drawString(left, top - 22, f"Teacher: {teacher_label}    Subject: {subject_label}")
-        y0 = top - 38
+        c.drawString(left + 14, meta_y_top - 40, f"{teacher_label}  •  {subject_label}")
     else:
-        y0 = top - 22
+        c.drawString(left + 14, meta_y_top - 40, "Teacher/Class Summary")
 
-    c.drawString(left, y0, f"Assessment: {assessment_name}")
-    c.drawString(left, y0 - 16, f"Baseline: {w1.start.strftime('%b %d, %Y')} – {w1.end.strftime('%b %d, %Y')}")
-    c.drawString(left, y0 - 32, f"Follow-up: {w2.start.strftime('%b %d, %Y')} – {w2.end.strftime('%b %d, %Y')}")
+    c.setFont(PDF_FONT_REG, 10.5)
+    y_line = meta_y_top - 58
+    # Assessment (wrap if needed)
+    assess_lines = _wrap_text(c, f"Assessment: {assessment_name}", usable_w - 28, PDF_FONT_REG, 10.5)
+    for i, line in enumerate(assess_lines[:2]):
+        c.drawString(left + 14, y_line - i * 12, line)
+    y_line -= 14 + (12 * (min(2, len(assess_lines)) - 1))
+    c.setFillColor(colors.grey)
+    c.setFont(PDF_FONT_REG, 9.2)
+    c.drawString(left + 14, y_line, f"Baseline window: {w1.start.strftime('%b %d, %Y')} – {w1.end.strftime('%b %d, %Y')}")
+    y_line -= 12
+    c.drawString(left + 14, y_line, f"Follow-up window: {w2.start.strftime('%b %d, %Y')} – {w2.end.strftime('%b %d, %Y')}")
+    y_line -= 12
+    c.drawString(left + 14, y_line, "Rule: uses the latest attempt in each window")
+    c.setFillColor(colors.black)
 
+    # --- Counts ---
     total = len(df)
-    both = df["Growth"].notna().sum()
-    baseline_only = df["BaselineScore"].notna().sum() - both
-    follow_only = df["FollowupScore"].notna().sum() - both
+    baseline_present = df["BaselineScore"].notna()
+    follow_present = df["FollowupScore"].notna()
+    both_mask = baseline_present & follow_present
+    both = int(both_mask.sum())
+    baseline_only = int((baseline_present & ~follow_present).sum())
+    follow_only = int((~baseline_present & follow_present).sum())
 
-    c.drawString(left, y0 - 60, f"Students in report: {total}")
-    c.drawString(left, y0 - 76, f"With both attempts: {both}")
-    c.drawString(left, y0 - 92, f"Baseline only: {baseline_only}    Follow-up only: {follow_only}")
+    # Growth stats (only students with both attempts)
+    g = df.loc[both_mask, "Growth"].dropna()
+    mean_g = float(g.mean()) if not g.empty else float("nan")
+    median_g = float(g.median()) if not g.empty else float("nan")
 
-    g = df["Growth"].dropna()
-    y = y0 - 126
-    if not g.empty:
-        c.drawString(left, y, f"Mean growth: {g.mean():.1f}    Median growth: {g.median():.1f}")
-        y -= 20
-        buckets = [
-            ("<= -20", (g <= -20).sum()),
-            ("-19 to -1", ((g >= -19) & (g <= -1)).sum()),
-            ("0", (g == 0).sum()),
-            ("1 to 19", ((g >= 1) & (g <= 19)).sum()),
-            (">= 20", (g >= 20).sum()),
-        ]
-        c.setFont(PDF_FONT_BOLD, 12)
-        c.drawString(left, y, "Growth Distribution")
-        c.setFont(PDF_FONT_REG, 11)
-        y -= 18
-        for label, cnt in buckets:
-            c.drawString(left, y, f"{label}: {cnt}")
-            y -= 16
+    improved_pct = float((g > 0).mean() * 100) if not g.empty else 0.0
+    decline_pct = float((g < 0).mean() * 100) if not g.empty else 0.0
+    nochange_pct = float((g == 0).mean() * 100) if not g.empty else 0.0
+
+    # Score range overlap (only where bands exist)
+    bands_ok = both_mask & df["BaselineBandMin"].notna() & df["BaselineBandMax"].notna() & df["FollowupBandMin"].notna() & df["FollowupBandMax"].notna()
+    if bands_ok.any():
+        bmin = df.loc[bands_ok, "BaselineBandMin"].astype(float)
+        bmax = df.loc[bands_ok, "BaselineBandMax"].astype(float)
+        fmin = df.loc[bands_ok, "FollowupBandMin"].astype(float)
+        fmax = df.loc[bands_ok, "FollowupBandMax"].astype(float)
+        overlap = ~((bmax < fmin) | (fmax < bmin))
+        overlap_pct = float(overlap.mean() * 100)
+        overlap_n = int(overlap.size)
     else:
-        c.drawString(left, y, "No growth computed (missing baseline or follow-up scores).")
+        overlap_pct = 0.0
+        overlap_n = 0
+
+    # --- KPI cards (2 rows x 4) ---
+    gap = 0.18 * inch
+    kpi_h = 0.90 * inch
+    kpi_w = (usable_w - 3 * gap) / 4
+
+    def _kpi(x, y, label, value, sub=None):
+        _draw_card(c, x, y, kpi_w, kpi_h, title=None, fill=colors.whitesmoke)
+        c.setFillColor(colors.grey)
+        c.setFont(PDF_FONT_BOLD, 8.6)
+        c.drawString(x + 12, y + kpi_h - 18, str(label).upper())
+        c.setFillColor(colors.black)
+        c.setFont(PDF_FONT_BOLD, 20)
+        c.drawString(x + 12, y + 22, str(value))
+        if sub:
+            c.setFillColor(colors.grey)
+            c.setFont(PDF_FONT_REG, 8.5)
+            c.drawString(x + 12, y + 10, str(sub))
+            c.setFillColor(colors.black)
+
+    y_kpi_top = meta_y - 0.26 * inch
+    y_row1 = y_kpi_top - kpi_h
+    x = left
+    _kpi(x, y_row1, "Students included", total, "baseline or follow-up")
+    x += kpi_w + gap
+    _kpi(x, y_row1, "Both attempts", both, "growth computed")
+    x += kpi_w + gap
+    _kpi(x, y_row1, "Baseline only", baseline_only)
+    x += kpi_w + gap
+    _kpi(x, y_row1, "Follow-up only", follow_only)
+
+    y_row2 = y_row1 - gap - kpi_h
+    x = left
+    _kpi(x, y_row2, "Mean growth", "—" if g.empty else f"{mean_g:.1f}")
+    x += kpi_w + gap
+    _kpi(x, y_row2, "Median growth", "—" if g.empty else f"{median_g:.1f}")
+    x += kpi_w + gap
+    _kpi(x, y_row2, "% improved", "—" if g.empty else f"{improved_pct:.0f}%")
+    x += kpi_w + gap
+    _kpi(x, y_row2, "% declined", "—" if g.empty else f"{decline_pct:.0f}%")
+
+    # small note under KPIs
+    note_y = y_row2 - 0.16 * inch
+    c.setFillColor(colors.grey)
+    c.setFont(PDF_FONT_REG, 8.6)
+    extra = f"% no change: {nochange_pct:.0f}%" if not g.empty else "% no change: —"
+    if overlap_n:
+        extra += f"   •   Score ranges overlap: {overlap_pct:.0f}% (n={overlap_n})"
+    c.drawString(left + 2, note_y, extra)
+    c.setFillColor(colors.black)
+
+    # --- Growth distribution chart card ---
+    dist_h = 1.70 * inch
+    dist_y_top = note_y - 0.24 * inch
+    dist_y = dist_y_top - dist_h
+    _draw_card(c, left, dist_y, usable_w, dist_h, title="Growth Distribution", title_size=12, fill=colors.whitesmoke)
+
+    if g.empty:
+        c.setFont(PDF_FONT_REG, 10)
+        c.setFillColor(colors.grey)
+        c.drawString(left + 14, dist_y + dist_h/2, "No growth computed (missing baseline or follow-up scores).")
+        c.setFillColor(colors.black)
+    else:
+        buckets = [
+            ("≤ -20", int((g <= -20).sum()), colors.red),
+            ("-19 to -1", int(((g >= -19) & (g <= -1)).sum()), colors.red),
+            ("0", int((g == 0).sum()), colors.grey),
+            ("1 to 19", int(((g >= 1) & (g <= 19)).sum()), colors.gold),
+            (f"≥ {thresholds['green_min']}", int((g >= thresholds["green_min"]).sum()), colors.green),
+        ]
+        max_cnt = max(cnt for _, cnt, _ in buckets) if buckets else 1
+        x_label = left + 14
+        x_bar = left + 150
+        x_bar_max = left + usable_w - 18
+        bar_max_w = x_bar_max - x_bar
+
+        y0 = dist_y + dist_h - 42
+        row_h = 18
+        bar_h = 10
+
+        c.setFont(PDF_FONT_REG, 9.2)
+        for i, (lab, cnt, col) in enumerate(buckets):
+            yy = y0 - i * row_h
+            pct = (cnt / max(1, int(g.size))) * 100
+            c.setFillColor(colors.black)
+            c.drawString(x_label, yy, lab)
+            wbar = (cnt / max_cnt) * bar_max_w if max_cnt else 0
+            c.setFillColor(col)
+            c.rect(x_bar, yy - 3, wbar, bar_h, stroke=0, fill=1)
+            c.setFillColor(colors.grey)
+            c.drawRightString(x_bar_max, yy, f"{cnt} ({pct:.0f}%)")
+
+        c.setFillColor(colors.black)
+
+    # --- Top movers (2 cards) ---
+    movers_h = 1.55 * inch
+    movers_y_top = dist_y - 0.24 * inch
+    movers_y = movers_y_top - movers_h
+    col_gap = 0.18 * inch
+    card_w = (usable_w - col_gap) / 2
+
+    _draw_card(c, left, movers_y, card_w, movers_h, title="Top Gains", title_size=12, fill=colors.whitesmoke)
+    _draw_card(c, left + card_w + col_gap, movers_y, card_w, movers_h, title="Largest Drops", title_size=12, fill=colors.whitesmoke)
+
+    df_both = df.loc[both_mask].copy()
+    if df_both.empty:
+        c.setFont(PDF_FONT_REG, 10)
+        c.setFillColor(colors.grey)
+        c.drawString(left + 14, movers_y + movers_h/2, "No students with both attempts.")
+        c.setFillColor(colors.black)
+    else:
+        df_both = df_both.sort_values("Growth", ascending=False)
+        top_gains = df_both.head(5)
+        top_drops = df_both.sort_values("Growth", ascending=True).head(5)
+
+        def _name(r):
+            ln = str(r.get("LastName", "") or r.get("StudentLastName", "") or "")
+            fn = str(r.get("FirstName", "") or r.get("StudentFirstName", "") or "")
+            return f"{ln}, {fn[:1]}." if fn else ln
+
+        def _draw_list(x0, rows):
+            yy = movers_y + movers_h - 42
+            for _, r in rows.iterrows():
+                nm = _name(r)
+                gr = r.get("Growth", 0)
+                try:
+                    gr_i = int(round(float(gr)))
+                except Exception:
+                    gr_i = 0
+                bsc = r.get("BaselineScore", None)
+                fsc = r.get("FollowupScore", None)
+                try:
+                    bsc_i = "—" if pd.isna(bsc) else str(int(round(float(bsc))))
+                except Exception:
+                    bsc_i = "—"
+                try:
+                    fsc_i = "—" if pd.isna(fsc) else str(int(round(float(fsc))))
+                except Exception:
+                    fsc_i = "—"
+
+                c.setFillColor(colors.black)
+                c.setFont(PDF_FONT_REG, 9.2)
+                c.drawString(x0 + 14, yy, nm)
+                c.setFont(PDF_FONT_BOLD, 10)
+                c.drawRightString(x0 + card_w - 14, yy, f"{gr_i:+d}")
+                c.setFillColor(colors.grey)
+                c.setFont(PDF_FONT_REG, 8.2)
+                c.drawString(x0 + 14, yy - 10, f"{bsc_i} → {fsc_i}")
+                c.setFillColor(colors.black)
+                yy -= 22
+
+        _draw_list(left, top_gains)
+        _draw_list(left + card_w + col_gap, top_drops)
+
+    # Legend / definitions
+    c.setFillColor(colors.grey)
+    c.setFont(PDF_FONT_REG, 8.2)
+    legend = "Definitions: Growth = Follow-up − Baseline (latest attempt per window). Score range = reported range around the score (margin of error)."
+    for i, line in enumerate(_wrap_text(c, legend, usable_w, PDF_FONT_REG, 8.2)[:2]):
+        c.drawString(left, movers_y - 14 - (i * 10), line)
+    c.setFillColor(colors.black)
 
     c.showPage()
 
