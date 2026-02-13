@@ -1446,6 +1446,21 @@ def add_teacher_assessment_to_zip(
         z.writestr(f"{base_folder}/Students/{_safe_path_part(fname)}", b)
 
 
+
+def add_teacher_assessment_overall_summary_to_zip(
+    z: zipfile.ZipFile,
+    teacher: str,
+    subject: str,
+    assessment: str,
+    summary_pdf: bytes,
+):
+    """Write a teacher-level summary at the assessment root (all sections combined)."""
+    parts = [teacher, subject, assessment]
+    base_folder = "/".join(_safe_path_part(p) for p in parts if p is not None and str(p).strip() != "")
+    z.writestr(f"{base_folder}/Summary_ALL.pdf", summary_pdf)
+
+
+
 # -----------------------------
 # Teacher mapping
 # -----------------------------
@@ -1976,16 +1991,19 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                 if a_ids.empty:
                     continue
 
-                present = a_ids.merge(teacher_map_join, on="StudentIdentifier", how="inner")
+                # Count only the teachers we will actually export
+                tm_for_count = teacher_map_join if all_teachers else teacher_map_join[teacher_map_join["TeacherName"] == teacher_choice]
+                present = a_ids.merge(tm_for_count, on="StudentIdentifier", how="inner")
                 if present.empty:
                     continue
 
                 if split_by_section:
                     present_groups = present[["TeacherName", "SectionNumber"]].drop_duplicates().shape[0]
+                    present_teachers = present["TeacherName"].nunique()
+                    total_tasks += int(present_groups + present_teachers)  # sections + 1 overall summary per teacher
                 else:
                     present_groups = present["TeacherName"].nunique()
-
-                total_tasks += int(present_groups)
+                    total_tasks += int(present_groups)
 
             total_tasks = max(total_tasks, 1)
             done = 0
@@ -2009,6 +2027,25 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
 
                     if split_by_section:
                         # Teacher + Section folders
+
+                        # NEW: Overall summary for ALL students per teacher (all sections combined)
+                        for t, t_all in assigned.groupby("TeacherName", sort=True):
+                            t_growth_all = (
+                                t_all.drop(columns=[c for c in drop_cols_base if c in t_all.columns], errors="ignore")
+                                     .drop_duplicates(subset=["StudentIdentifier", "AssessmentName"], keep="first")
+                                     .copy()
+                            )
+                            if t_growth_all.empty:
+                                continue
+
+                            summary_all_pdf = make_summary_pdf(
+                                t_growth_all, a, w1, w2, teacher_label=t, subject_label=subject_choice
+                            )
+                            add_teacher_assessment_overall_summary_to_zip(z, t, subject_choice, a, summary_all_pdf)
+
+                            done += 1
+                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+
                         for (t, sec), gdf in assigned.groupby(["TeacherName", "SectionNumber"], sort=True):
                             period = None
                             room = None
@@ -2078,6 +2115,21 @@ if st.button("Generate ZIP (student one-pagers + summary)"):
                         continue
 
                     if split_by_section:
+                        # NEW: Overall summary for ALL students for this teacher (all sections combined)
+                        t_growth_all = (
+                            assigned.drop(columns=[c for c in drop_cols_base if c in assigned.columns], errors="ignore")
+                                   .drop_duplicates(subset=["StudentIdentifier", "AssessmentName"], keep="first")
+                                   .copy()
+                        )
+                        if not t_growth_all.empty:
+                            summary_all_pdf = make_summary_pdf(
+                                t_growth_all, a, w1, w2, teacher_label=teacher_choice, subject_label=subject_choice
+                            )
+                            add_teacher_assessment_overall_summary_to_zip(z, teacher_choice, subject_choice, a, summary_all_pdf)
+
+                            done += 1
+                            prog.progress(done / total_tasks, text=f"Generating teacher packets… ({done}/{total_tasks})")
+
                         for sec, gdf in assigned.groupby("SectionNumber", sort=True):
                             period = None
                             room = None
