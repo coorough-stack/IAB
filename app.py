@@ -713,7 +713,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.setFillColor(colors.black)
 
     c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x1 + 14, y_cards + h3 - 110, f"Error band: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
+    c.drawString(x1 + 14, y_cards + h3 - 110, f"Score range: {'' if pd.isna(b_min) else int(b_min)}–{'' if pd.isna(b_max) else int(b_max)}")
     c.drawString(x1 + 14, y_cards + h3 - 126, f"Category: {b_cat}")
     c.drawString(x1 + 14, y_cards + h3 - 142, f"Status: {b_status}")
 
@@ -735,7 +735,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.setFillColor(colors.black)
 
     c.setFont(PDF_FONT_REG, 10)
-    c.drawString(x2 + 14, y_cards + h3 - 110, f"Error band: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
+    c.drawString(x2 + 14, y_cards + h3 - 110, f"Score range: {'' if pd.isna(f_min) else int(f_min)}–{'' if pd.isna(f_max) else int(f_max)}")
     c.drawString(x2 + 14, y_cards + h3 - 126, f"Category: {f_cat}")
     c.drawString(x2 + 14, y_cards + h3 - 142, f"Status: {f_status}")
 
@@ -859,7 +859,7 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
 
         c.setFont(PDF_FONT_REG, 9)
         c.setFillColor(colors.grey)
-        c.drawCentredString(x3 + w3 / 2, pill_y - 48, f"Error bands overlap: {overlap_txt}")
+        c.drawCentredString(x3 + w3 / 2, pill_y - 48, f"Score ranges overlap: {overlap_txt}")
         c.setFillColor(colors.black)
 
 
