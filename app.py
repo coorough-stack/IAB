@@ -961,7 +961,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     thresholds = GROWTH_THRESHOLDS_DEFAULT
 
     # --- Meta card (teacher / assessment / windows) ---
-    meta_h = 1.05 * inch
+    meta_h = 1.45 * inch
     meta_y_top = top
     meta_y = meta_y_top - meta_h
     _draw_card(c, left, meta_y, usable_w, meta_h, title=None, fill=colors.whitesmoke)
@@ -977,7 +977,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
         c.drawString(left + 14, meta_y_top - 40, "Teacher/Class Summary")
 
     c.setFont(PDF_FONT_REG, 10.5)
-    y_line = meta_y_top - 58
+    y_line = meta_y_top - 52
     # Assessment (wrap if needed)
     assess_lines = _wrap_text(c, f"Assessment: {assessment_name}", usable_w - 28, PDF_FONT_REG, 10.5)
     for i, line in enumerate(assess_lines[:2]):
@@ -986,9 +986,9 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     c.setFillColor(colors.grey)
     c.setFont(PDF_FONT_REG, 9.2)
     c.drawString(left + 14, y_line, f"Baseline window: {w1.start.strftime('%b %d, %Y')} – {w1.end.strftime('%b %d, %Y')}")
-    y_line -= 12
+    y_line -= 11
     c.drawString(left + 14, y_line, f"Follow-up window: {w2.start.strftime('%b %d, %Y')} – {w2.end.strftime('%b %d, %Y')}")
-    y_line -= 12
+    y_line -= 11
     c.drawString(left + 14, y_line, "Rule: uses the latest attempt in each window")
     c.setFillColor(colors.black)
 
@@ -1043,7 +1043,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
             c.drawString(x + 12, y + 10, str(sub))
             c.setFillColor(colors.black)
 
-    y_kpi_top = meta_y - 0.26 * inch
+    y_kpi_top = meta_y - 0.18 * inch
     y_row1 = y_kpi_top - kpi_h
     x = left
     _kpi(x, y_row1, "Students included", total, "baseline or follow-up")
@@ -1075,8 +1075,8 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
     c.setFillColor(colors.black)
 
     # --- Growth distribution chart card ---
-    dist_h = 1.70 * inch
-    dist_y_top = note_y - 0.24 * inch
+    dist_h = 1.55 * inch
+    dist_y_top = note_y - 0.20 * inch
     dist_y = dist_y_top - dist_h
     _draw_card(c, left, dist_y, usable_w, dist_h, title="Growth Distribution", title_size=12, fill=colors.whitesmoke)
 
@@ -1118,8 +1118,8 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
         c.setFillColor(colors.black)
 
     # --- Top movers (2 cards) ---
-    movers_h = 1.55 * inch
-    movers_y_top = dist_y - 0.24 * inch
+    movers_h = 1.75 * inch
+    movers_y_top = dist_y - 0.20 * inch
     movers_y = movers_y_top - movers_h
     col_gap = 0.18 * inch
     card_w = (usable_w - col_gap) / 2
@@ -1135,8 +1135,8 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
         c.setFillColor(colors.black)
     else:
         df_both = df_both.sort_values("Growth", ascending=False)
-        top_gains = df_both.head(5)
-        top_drops = df_both.sort_values("Growth", ascending=True).head(5)
+        top_gains = df_both.head(4)
+        top_drops = df_both.sort_values("Growth", ascending=True).head(4)
 
         def _name(r):
             ln = str(r.get("LastName", "") or r.get("StudentLastName", "") or "")
@@ -1144,7 +1144,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
             return f"{ln}, {fn[:1]}." if fn else ln
 
         def _draw_list(x0, rows):
-            yy = movers_y + movers_h - 42
+            yy = movers_y + movers_h - 28
             for _, r in rows.iterrows():
                 nm = _name(r)
                 gr = r.get("Growth", 0)
@@ -1172,7 +1172,7 @@ def make_summary_pdf(growth_df: pd.DataFrame, assessment_name: str, w1: Window, 
                 c.setFont(PDF_FONT_REG, 8.2)
                 c.drawString(x0 + 14, yy - 10, f"{bsc_i} → {fsc_i}")
                 c.setFillColor(colors.black)
-                yy -= 22
+                yy -= 28
 
         _draw_list(left, top_gains)
         _draw_list(left + card_w + col_gap, top_drops)
