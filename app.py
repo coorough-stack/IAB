@@ -26,7 +26,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 import os
 
 # -----------------------------
-# PDF font handling
+# PDF font handling test
 # Some PDF viewers fake-bold base fonts by drawing the same text multiple times.
 # Embedding a real TTF font avoids the "duplicated/offset text" look.
 # -----------------------------
