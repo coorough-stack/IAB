@@ -505,6 +505,10 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     c.drawString(x0, height - 0.52 * inch, "IAB/FIAB Growth Report")
     c.setFont(PDF_FONT_REG, 10)
     c.drawRightString(xR, height - 0.52 * inch, "Latest attempt in each window")
+    c.setFont(PDF_FONT_REG, 8.5)
+    c.setFillColor(colors.lightgrey)
+    c.drawRightString(xR, height - 0.68 * inch, f"Generated: {datetime.now().strftime('%b %d, %Y')} • Source: CA Interim (IAB/FIAB)")
+    c.setFillColor(colors.white)
     c.restoreState()
 
     def _month_label(w: Window) -> str:
@@ -630,6 +634,57 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
     g = row.get("Growth", pd.NA)
     g_color = growth_color(g, thresholds)
 
+    # Mini sparkline (baseline → follow-up) inside Growth card for a more "report-like" feel
+    try:
+        bs = float(b_score) if (b_score is not None and not pd.isna(b_score)) else None
+        fs = float(f_score) if (f_score is not None and not pd.isna(f_score)) else None
+    except Exception:
+        bs, fs = None, None
+
+    if (bs is not None) or (fs is not None):
+        spark_w = w3 - 28
+        spark_h = 0.22 * inch
+        spark_x = x3 + 14
+        spark_top = y_cards + h3 - 34
+        spark_y = spark_top - spark_h
+
+        c.saveState()
+        c.setLineWidth(2)
+        c.setStrokeColor(g_color if (bs is not None and fs is not None) else colors.grey)
+        c.setFillColor(colors.white)
+
+        xL = spark_x + 6
+        xR2 = spark_x + spark_w - 6
+
+        if (bs is not None) and (fs is not None):
+            vmin = min(bs, fs)
+            vmax = max(bs, fs)
+            if vmax == vmin:
+                vmax = vmin + 1
+            pad = (vmax - vmin) * 0.20
+            low = vmin - pad
+            high = vmax + pad
+
+            def _mapy(v):
+                return spark_y + (v - low) / (high - low) * spark_h
+
+            yL = _mapy(bs)
+            yR = _mapy(fs)
+
+            c.line(xL, yL, xR2, yR)
+            c.setStrokeColor(g_color)
+            c.circle(xL, yL, 3, stroke=1, fill=1)
+            c.circle(xR2, yR, 3, stroke=1, fill=1)
+        else:
+            # Only one point available
+            v = bs if bs is not None else fs
+            yM = spark_y + spark_h / 2
+            xM = (xL + xR2) / 2
+            c.setStrokeColor(colors.grey)
+            c.circle(xM, yM, 3, stroke=1, fill=1)
+
+        c.restoreState()
+
     pill_h = 0.82 * inch
     pill_w = w3 - 28
     pill_x = x3 + 14
@@ -646,12 +701,26 @@ def draw_student_one_pager(c: canvas.Canvas, row: pd.Series, w1: Window, w2: Win
 
     c.setFont(PDF_FONT_REG, 9)
     c.setFillColor(colors.grey)
-    c.drawCentredString(x3 + w3 / 2, pill_y - 14, "Points (Follow-up − Baseline)")
+    c.drawCentredString(x3 + w3 / 2, pill_y - 16, "Points (Follow-up − Baseline)")
     c.setFillColor(colors.black)
 
     if (not pd.isna(b_score)) and (not pd.isna(f_score)):
         c.setFont(PDF_FONT_BOLD, 12)
-        c.drawCentredString(x3 + w3 / 2, pill_y - 34, f"{int(b_score)}  →  {int(f_score)}")
+        c.drawCentredString(x3 + w3 / 2, pill_y - 32, f"{int(b_score)}  →  {int(f_score)}")
+        # Error band overlap indicator (helps interpret small changes)
+        overlap_txt = "N/A"
+        try:
+            if (not pd.isna(b_min)) and (not pd.isna(b_max)) and (not pd.isna(f_min)) and (not pd.isna(f_max)):
+                overlap = max(float(b_min), float(f_min)) <= min(float(b_max), float(f_max))
+                overlap_txt = "Yes" if overlap else "No"
+        except Exception:
+            overlap_txt = "N/A"
+
+        c.setFont(PDF_FONT_REG, 9)
+        c.setFillColor(colors.grey)
+        c.drawCentredString(x3 + w3 / 2, pill_y - 48, f"Error bands overlap: {overlap_txt}")
+        c.setFillColor(colors.black)
+
 
     # ---------- Footer (single) ----------
     footer = (
