@@ -26,7 +26,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 import os
 
 # -----------------------------
-# PDF font handling test
+# PDF font handling
 # Some PDF viewers fake-bold base fonts by drawing the same text multiple times.
 # Embedding a real TTF font avoids the "duplicated/offset text" look.
 # -----------------------------
@@ -1413,11 +1413,22 @@ def add_teacher_assessment_to_zip(z: zipfile.ZipFile, teacher: str, subject: str
 # -----------------------------
 def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame, crosswalk_df: pd.DataFrame | None) -> pd.DataFrame:
     """
-    Returns unique rows: StudentIdentifier, TeacherName, SubjectNorm
+    Build a student->teacher mapping used for per-teacher exports.
 
-    If roster already has StudentIdentifier, crosswalk is optional.
-    If roster only has StudentID, crosswalk is required to map to StudentIdentifier.
+    Returns unique rows with columns:
+        StudentIdentifier, TeacherName, SubjectNorm
+
+    Notes:
+    - If roster already has StudentIdentifier, crosswalk is optional.
+    - If roster only has StudentID, crosswalk is required to map to StudentIdentifier.
+    - To avoid section number collisions across schools, the join prefers:
+        (SchoolCode, SectionNumber) if present in BOTH roster & sectionmap and non-empty;
+        otherwise (SchoolNameNorm, SectionNumber) if present and non-empty;
+        otherwise falls back to SectionNumber only.
     """
+    if roster_df is None or section_df is None:
+        raise ValueError("Roster and SectionMap are required to build teacher grouping.")
+
     roster = roster_df.copy()
     section = section_df.copy()
 
@@ -1425,27 +1436,48 @@ def build_student_teacher_map(roster_df: pd.DataFrame, section_df: pd.DataFrame,
     if "StudentIdentifier" not in roster.columns or roster["StudentIdentifier"].isna().all():
         if crosswalk_df is None:
             raise ValueError("Roster does not include StudentIdentifier; please upload Crosswalk CSV.")
+        if "StudentID" not in roster.columns:
+            raise ValueError("Roster is missing StudentID, so Crosswalk cannot be applied.")
         roster = roster.merge(crosswalk_df, on="StudentID", how="left")
-        # Choose join key to avoid section collisions across schools
-        join_keys = ["SectionNumber"]
-        if "SchoolCode" in roster.columns and "SchoolCode" in section.columns:
-            if roster["SchoolCode"].fillna("").astype(str).str.strip().ne("").any() and section["SchoolCode"].fillna("").astype(str).str.strip().ne("").any():
-                join_keys = ["SchoolCode", "SectionNumber"]
-        if join_keys == ["SectionNumber"]:
-            if "SchoolNameNorm" in roster.columns and "SchoolNameNorm" in section.columns:
-                if roster["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any() and section["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any():
-                    join_keys = ["SchoolNameNorm", "SectionNumber"]
+        if "StudentIdentifier" not in roster.columns or roster["StudentIdentifier"].isna().all():
+            raise ValueError("Crosswalk merge did not produce StudentIdentifier (check StudentID keys).")
 
-        sec_cols = join_keys + ["TeacherName", "SubjectNorm"]
-        sec_cols = [c for c in sec_cols if c in section.columns]
-        m = roster.merge(section[sec_cols], on=join_keys, how="left")
-    out = m[["StudentIdentifier", "TeacherName", "SubjectNorm"]].dropna(subset=["StudentIdentifier", "TeacherName", "SubjectNorm"]).drop_duplicates()
+    # Ensure normalized school names exist if SchoolName exists
+    if "SchoolNameNorm" not in roster.columns and "SchoolName" in roster.columns:
+        roster["SchoolNameNorm"] = roster["SchoolName"].map(_norm_school_name)
+    if "SchoolNameNorm" not in section.columns and "SchoolName" in section.columns:
+        section["SchoolNameNorm"] = section["SchoolName"].map(_norm_school_name)
+
+    # Choose join key to avoid section collisions across schools
+    join_keys = ["SectionNumber"]
+    if "SchoolCode" in roster.columns and "SchoolCode" in section.columns:
+        if roster["SchoolCode"].fillna("").astype(str).str.strip().ne("").any() and section["SchoolCode"].fillna("").astype(str).str.strip().ne("").any():
+            join_keys = ["SchoolCode", "SectionNumber"]
+    if join_keys == ["SectionNumber"]:
+        if "SchoolNameNorm" in roster.columns and "SchoolNameNorm" in section.columns:
+            if roster["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any() and section["SchoolNameNorm"].fillna("").astype(str).str.strip().ne("").any():
+                join_keys = ["SchoolNameNorm", "SectionNumber"]
+
+    # Ensure required fields exist in sectionmap
+    if "TeacherName" not in section.columns:
+        raise ValueError("SectionMap is missing TeacherName.")
+    if "SubjectNorm" not in section.columns:
+        raise ValueError("SectionMap is missing Subject (normalized). Make sure Subject exists in SectionMap CSV.")
+
+    sec_cols = join_keys + ["TeacherName", "SubjectNorm"]
+    sec_cols = [c for c in sec_cols if c in section.columns]
+
+    merged = roster.merge(section[sec_cols], on=join_keys, how="left")
+
+    out = merged[["StudentIdentifier", "TeacherName", "SubjectNorm"]].dropna(
+        subset=["StudentIdentifier", "TeacherName", "SubjectNorm"]
+    ).drop_duplicates()
+
+    out["StudentIdentifier"] = out["StudentIdentifier"].astype(str)
     out["TeacherName"] = out["TeacherName"].astype(str)
     out["SubjectNorm"] = out["SubjectNorm"].astype(str)
+
     return out
-
-
-
 def filter_teacher_map_by_subject(teacher_map: pd.DataFrame, subject_choice: str) -> pd.DataFrame:
     # Include "Both" for elementary homeroom/core sections
     if str(subject_choice).upper() == "MATH":
